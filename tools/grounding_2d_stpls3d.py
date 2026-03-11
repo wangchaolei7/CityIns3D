@@ -6,19 +6,14 @@ import numpy as np
 from tqdm import tqdm, trange
 import cv2
 import pickle
+from munch import Munch
 
 # Util
-# from util2d.grounded_sam_original import Grounded_Sam
-# from util2d.yoloworld_sam import YOLOWorld_SAM, YOLOWorld_SAM_Stpls3d
-# from util2d.yoloworld_sam_nodepth import YOLOWorld_SAM # 没有深度图
-from util2d.sam import Sam # only SAM
-# from util2d.sam_rebuttal import Sam_Rebuttal
-from util2d.sam_stpls3d import Sam_Stpls3d
+from util2d.sam3_stpls3d import Sam3_Stpls3d
 
 from util2d.util import masks_to_rle
 
-# from open3dis.dataset.scannet200 import INSTANCE_CAT_SCANNET_200 # Scannet200
-from open3dis.dataset.kitti360 import INSTANCE_CAT_KITTI360 # 
+# from open3dis.dataset.kitti360 import INSTANCE_CAT_KITTI360 # 
 from open3dis.dataset_outdoor.stpls3d import INSTANCE_CAT_STPLS3D
 
 ############################################## Foundations 2D + SAM ##############################################
@@ -53,17 +48,15 @@ if __name__ == "__main__":
 
     # Fondation model loader
     if cfg.segmenter2d.model == 'Grounded-SAM':
+        from util2d.grounded_sam_original import Grounded_Sam
         model = Grounded_Sam(cfg)
-    elif cfg.segmenter2d.model == 'YoloW-SAM':
-        model = YOLOWorld_SAM(cfg)
-    elif cfg.segmenter2d.model == 'YoloW-SAM_Stpls3d':  ### for Stpls3d
-        model = YOLOWorld_SAM_Stpls3d(cfg)
-    elif cfg.segmenter2d.model == 'SAM':
-        model = Sam(cfg)
-    elif cfg.segmenter2d.model == 'SAM_Rebuttal':  ### for rebuttal
-        model = Sam_Rebuttal(cfg)
     elif cfg.segmenter2d.model == 'SAM_Stpls3d':  ### for Stpls3d
+        from util2d.sam_stpls3d import Sam_Stpls3d
         model = Sam_Stpls3d(cfg)
+    elif cfg.segmenter2d.model == 'SAM3_Stpls3d':
+        model = Sam3_Stpls3d(cfg)
+    else:
+        raise ValueError(f"Unknown segmenter2d.model: {cfg.segmenter2d.model}")
 
     # Directory Init
     save_dir = os.path.join(cfg.exp.save_dir, cfg.exp.exp_name, cfg.exp.mask2d_output)
@@ -77,18 +70,18 @@ if __name__ == "__main__":
             # Tracker
             done = False
             path = scene_id + ".pth"
-            with open("tracker_2d_stpls3d.txt", "r") as file:
-                lines = file.readlines()
-                lines = [line.strip() for line in lines]
-                for line in lines:
-                    if path in line:
-                        done = True
-                        break
+            # with open("track/tracker_2d_stpls3d.txt", "r") as file:
+            #     lines = file.readlines()
+            #     lines = [line.strip() for line in lines]
+            #     for line in lines:
+            #         if path in line:
+            #             done = True
+            #             break
             if done == True:
                 print("existed " + path)
                 continue
             # Write append each line
-            with open("tracker_2d_stpls3d.txt", "a") as file:
+            with open("track/tracker_2d_stpls3d.txt", "a") as file:
                 file.write(path + "\n")
             #####################################
             print("Process", scene_id)

@@ -11,6 +11,14 @@ foundation_model:
   yoloworld_checkpoint: '../pretrains/foundation_models/yolo_world_v2_x_obj365v1_goldg_cc3mlite_pretrain_1280ft-14996a36.pth'
   # Segment Anything Model
   sam_checkpoint: '../pretrains/foundation_models/sam_vit_h_4b8939.pth'
+  # SAM3
+  sam3_repo_path: '/home/wangcl/sam3'
+  sam3_checkpoint: '/data1/wangcl/project/CityIns3D/sam3_checkpoint/sam3.pt'
+  sam3_confidence_threshold: 0.5
+  sam3_prompt_template: '{label}'
+  sam3_inference_mode: 'batched' # 或 'sequential'
+  sam3_log_timing: False
+  sam3_compile: False
   # SAM2
   sam2_model_config: "configs/sam2.1/sam2.1_hiera_l.yaml" 
   sam2_checkpoint: "/home/Data/data3/wcl/offline_wheel/sam2.1_hiera_large.pt"
@@ -30,7 +38,8 @@ segmenter2d:
   # model: 'Grounded-SAM' # select 2D segmenter ⭐
   # model: 'YoloW-SAM_Stpls3d'
   # model: 'SAM'
-  model: 'SAM_Stpls3d'
+  model: 'SAM3_Stpls3d'
+  # model: 'SAM_Stpls3d'
   # model: 'Grounded-SAM2'
 
 grounded_feature:
@@ -39,12 +48,12 @@ grounded_feature:
 data:
   dataset_name: 'stpls3d'
   split_path: './open3dis/dataset_outdoor/stpls3d_val.txt'
-  datapath: '/home/Data/data2/wcl/DataSet/STPLS3D_Open3DIS/2D' # RGB-D + pose path
-  gt_pth: '/home/Data/data2/wcl/DataSet/STPLS3D_Open3DIS/3D/groundtruth' # gt path
-  original_ply: '/home/Data/data2/wcl/DataSet/STPLS3D_Open3DIS/3D/original_ply_files' # raw pcl
-  spp_path: '/home/Data/data2/wcl/DataSet/STPLS3D_Open3DIS/3D/superpoints' # spp path
-  cls_agnostic_3d_proposals_path: '/home/Data/data2/wcl/DataSet/STPLS3D_Open3DIS/3D/isbnet_clsagnostic_scannet200' # cls agnostic 3D proposals
-  dc_features_path: '/home/Data/data2/wcl/DataSet/STPLS3D_Open3DIS/3D/sppfeatures' # spp feature path
+  datapath: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/2D' # RGB-D + pose path
+  gt_pth: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/groundtruth' # gt path
+  original_ply: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/original_ply_files' # raw pcl
+  spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/superpoints' # spp path
+  cls_agnostic_3d_proposals_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/isbnet_clsagnostic_scannet200' # cls agnostic 3D proposals
+  dc_features_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/sppfeatures' # spp feature path
   img_dim: [2000, 2000] # coord alignment
   rgb_img_dim: [2000, 2000]
   cut_num_pixel_boundary: 0
@@ -69,15 +78,14 @@ final_instance:
   scale_semantic_score: 300.0
 
 exp:
-  exp_name: "version_SAM"  # for ablation study
+  exp_name: "version_SAM3"  # for ablation study
   # exp_name: "version_YoloW-SAM"  # for ablation study
-  mask2d_output: 'maskSAM' # 2D mask + pc features
+  mask2d_output: 'mask' # 2D mask + pc features
   grounded_feat_output: 'grounded_feat' # first stage feature
   refined_grounded_feat_output: 'refined_grounded_feat' # second stage feature
-  # clustering_3d_output: 'hier_agglo_spp_dbscan_test' # 2Dlift path
   clustering_3d_output: 'hier_agglo_spp_dbscan_img16_0.550' # 2Dlift path
   final_output: 'final_result_hier_agglo' 
-  save_dir: '/home/Data/data2/wcl/Open3DIS/exp_stpls3d/'
+  save_dir: '/data1/wangcl/project/CityIns3D/stpls3d/'
 
 
 proposals:
@@ -96,13 +104,5 @@ agglomerative: #⭐添加sequential
   hierarchical: True
   sequential: False
 
-mask:
-  mask_visible_threshold: 0.3
-  undersegment_filter_threshold: 0.3
-  view_consensus_threshold: 0.9
-  contained_threshold: 0.8
-  point_filter_threshold: 0.5
-  cropformer_path: '/home/wcl/MaskClustering/checkpoint/ckpt/Mask2Former_hornet_3x_576d0b.pth'
-  step: 4 # 无效parameter
-  debug: True
+
 fp16: True

@@ -11,6 +11,14 @@ foundation_model:
   yoloworld_checkpoint: '../pretrains/foundation_models/yolo_world_v2_x_obj365v1_goldg_cc3mlite_pretrain_1280ft-14996a36.pth'
   # Segment Anything Model
   sam_checkpoint: '../pretrains/foundation_models/sam_vit_h_4b8939.pth'
+  # SAM3
+  sam3_repo_path: '/home/wangcl/sam3'
+  sam3_checkpoint: '/data1/wangcl/project/CityIns3D/sam3_checkpoint/sam3.pt'
+  sam3_confidence_threshold: 0.5
+  sam3_prompt_template: '{label}'
+  sam3_inference_mode: 'batched' # 或 'sequential'
+  sam3_log_timing: False
+  sam3_compile: False
   # SAM2
   sam2_model_config: "configs/sam2.1/sam2.1_hiera_l.yaml" 
   sam2_checkpoint: "/home/Data/data3/wcl/offline_wheel/sam2.1_hiera_large.pt"
@@ -30,7 +38,8 @@ segmenter2d:
   # model: 'Grounded-SAM' # select 2D segmenter ⭐
   # model: 'YoloW-SAM_Stpls3d'
   # model: 'SAM'
-  model: 'SAM_Stpls3d'
+  model: 'SAM3_Stpls3d'
+  # model: 'SAM_Stpls3d'
   # model: 'Grounded-SAM2'
 
 grounded_feature:
@@ -76,7 +85,7 @@ exp:
   refined_grounded_feat_output: 'refined_grounded_feat' # second stage feature
   clustering_3d_output: 'hier_agglo_spp_dbscan_img16_0.550' # 2Dlift path
   final_output: 'final_result_hier_agglo' 
-  save_dir: '/data1/wangcl/A-experiment/CityIns3D/stpls3d/'
+  save_dir: '/data1/wangcl/project/CityIns3D/stpls3d/'
 
 
 proposals:
