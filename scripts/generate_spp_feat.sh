@@ -4,6 +4,16 @@ PID0=""
 PID1=""
 TASK_PID=""
 USE_SETSID=0
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+GPU0="${GPU0:-4}"
+GPU1="${GPU1:-5}"
+CONFIG0="${CONFIG0:-configs/stpls3d.yaml}"
+CONFIG1="${CONFIG1:-configs/stpls3d_1.yaml}"
+
+cd "$REPO_ROOT" || exit 1
 
 if command -v setsid >/dev/null 2>&1; then
   USE_SETSID=1
@@ -12,19 +22,20 @@ fi
 start_task() {
   gpu_id="$1"
   config_path="$2"
+  shift 2
 
   if [ "$USE_SETSID" -eq 1 ]; then
     setsid env \
       CUDA_VISIBLE_DEVICES="$gpu_id" \
       PYTHONWARNINGS="ignore" \
       PYTHONPATH="./:$PYTHONPATH" \
-      python3 tools/grounding_2d_stpls3d.py --config "$config_path" &
+      "$PYTHON_BIN" tools/generate_point_feat_utonia.py --config "$config_path" "$@" &
   else
     env \
       CUDA_VISIBLE_DEVICES="$gpu_id" \
       PYTHONWARNINGS="ignore" \
       PYTHONPATH="./:$PYTHONPATH" \
-      python3 tools/grounding_2d_stpls3d.py --config "$config_path" &
+      "$PYTHON_BIN" tools/generate_point_feat_utonia.py --config "$config_path" "$@" &
   fi
   TASK_PID=$!
 }
@@ -50,7 +61,7 @@ stop_task() {
 
 cleanup() {
   echo
-  echo "🛑 Interrupt received. Stopping background tasks..."
+  echo "Interrupt received. Stopping background tasks..."
   stop_task "$PID0"
   stop_task "$PID1"
   wait "$PID0" 2>/dev/null || true
@@ -60,25 +71,25 @@ cleanup() {
 
 trap cleanup INT TERM HUP
 
-echo "🚀 Starting GPU 0 task..."
-start_task 4 configs/stpls3d.yaml
+echo "Starting GPU ${GPU0} task..."
+start_task "$GPU0" "$CONFIG0" "$@"
 PID0="$TASK_PID"
 
-echo "🚀 Starting GPU 1 task..."
-start_task 5 configs/stpls3d_1.yaml
+echo "Starting GPU ${GPU1} task..."
+start_task "$GPU1" "$CONFIG1" "$@"
 PID1="$TASK_PID"
 
-echo "⏳ Waiting for both tasks to complete..."
+echo "Waiting for both tasks to complete..."
 wait "$PID0"
 STATUS0=$?
-echo "✅ GPU 0 task finished."
+echo "GPU ${GPU0} task finished."
 
 wait "$PID1"
 STATUS1=$?
-echo "✅ GPU 1 task finished."
+echo "GPU ${GPU1} task finished."
 
 if [ "$STATUS0" -ne 0 ] || [ "$STATUS1" -ne 0 ]; then
   exit 1
 fi
 
-echo "🎉 All done! Results saved in respective GPU directories."
+echo "All done. Point features saved to configured output directories."

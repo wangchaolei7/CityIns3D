@@ -101,6 +101,8 @@ class STPLS3DReader(object):
     
     def read_feature(self, feat_path, device='cuda'):
         dc_feature = torch.load(feat_path)
+        if isinstance(dc_feature, dict) and "feat" in dc_feature:
+            dc_feature = dc_feature["feat"]
         if isinstance(dc_feature, np.ndarray):
             dc_feature = torch.from_numpy(dc_feature)
         

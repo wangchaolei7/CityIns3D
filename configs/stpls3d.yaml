@@ -22,6 +22,17 @@ foundation_model:
   # SAM2
   sam2_model_config: "configs/sam2.1/sam2.1_hiera_l.yaml" 
   sam2_checkpoint: "/home/Data/data3/wcl/offline_wheel/sam2.1_hiera_large.pt"
+  # Utonia
+  utonia_repo_path: './segmenter3d/Utonia'
+  utonia_checkpoint: 'utonia'
+  utonia_repo_id: 'Pointcept/Utonia'
+  utonia_scale: 0.2
+  utonia_apply_z_positive: False
+  utonia_normalize_coord: False
+  utonia_upcast_levels: 4
+  utonia_superpoint_upcast_levels: 2
+  utonia_output_dtype: 'float16'
+  utonia_fallback_patch_size: 1024
   # CLIP
   clip_model: 'ViT-L/14@336px'
   device: 'cuda'
@@ -51,7 +62,8 @@ data:
   datapath: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/2D' # RGB-D + pose path
   gt_pth: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/groundtruth' # gt path
   original_ply: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/original_ply_files' # raw pcl
-  spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/superpoints' # spp path
+  spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/utonia_superpoints_hdbscan_dotassign' # spp path
+  point_features_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/utonia_point_features' # point-level feature path
   cls_agnostic_3d_proposals_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/isbnet_clsagnostic_scannet200' # cls agnostic 3D proposals
   dc_features_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/sppfeatures' # spp feature path
   img_dim: [2000, 2000] # coord alignment
@@ -59,6 +71,21 @@ data:
   cut_num_pixel_boundary: 0
   img_interval: 1
   num_classes: 12
+
+superpoint:
+  method: 'utonia_voxel_prototype'
+  save_dir: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/utonia_superpoints'
+  proto_grid_size: 0.5
+  cluster_method: 'hdbscan'
+  hdbscan_min_cluster_size: 20
+  hdbscan_min_samples: 10
+  prototype_feature_normalize: True
+  feature_weight: 1.0
+  coord_weight: 0.35
+  pca_dim: 16
+  assignment_chunk_size: 32768
+  fallback_num_prototypes: 256
+  component_connectivity: 6
 
 cluster:
   visi: 0.9 # iou
@@ -83,7 +110,7 @@ exp:
   mask2d_output: 'mask' # 2D mask + pc features
   grounded_feat_output: 'grounded_feat' # first stage feature
   refined_grounded_feat_output: 'refined_grounded_feat' # second stage feature
-  clustering_3d_output: 'hier_agglo_spp_dbscan_img16_0.550' # 2Dlift path
+  clustering_3d_output: '3d_ins_img16' # 2Dlift path
   final_output: 'final_result_hier_agglo' 
   save_dir: '/data1/wangcl/project/CityIns3D/stpls3d/'
 

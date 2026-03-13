@@ -1,12 +1,16 @@
-import torch
-import numpy as np
-import random
+import argparse
 import os
+import random
+
+import numpy as np
+import torch
+import yaml
 
 import pyviz3d.visualizer as viz
 from plyfile import PlyData
 from os.path import join
 import open3d as o3d
+from munch import Munch
 
 def generate_palette(n):
     palette = []
@@ -59,19 +63,24 @@ class VisualizationScannet200:
     
     def superpointviz(self, spp_path):
         print('...Visualizing Superpoints...')
-        # spp = torch.from_numpy(torch.load(spp_path)).to(device='cuda')
-        spp = torch.load(spp_path).to(device='cuda')
+        spp = torch.load(spp_path, map_location='cpu')
+        if isinstance(spp, np.ndarray):
+            spp = torch.from_numpy(spp)
+        spp = spp.to(dtype=torch.int64)
         unique_spp, spp, num_point = torch.unique(spp, return_inverse=True, return_counts=True)
         n_spp = unique_spp.shape[0]
         pallete =  generate_palette(n_spp + 1)
         uniqueness = torch.unique(spp).clone()
-        # skip -1 
         tt_col = self.color.copy()
-        for i in range(0, uniqueness.shape[0]):
-            ss = torch.where(spp == uniqueness[i].item())[0]
-            for ind in ss:
-                tt_col[ind,:] = pallete[int(uniqueness[i].item())]
-        self.vis.add_points(f'superpoint: ' + str(i), self.point, tt_col, point_size=20, visible=True)
+        for idx in range(uniqueness.shape[0]):
+            label_value = int(uniqueness[idx].item())
+            if label_value < 0:
+                continue
+            ss = torch.where(spp == label_value)[0]
+            color_idx = label_value % len(pallete)
+            for ind in ss.tolist():
+                tt_col[ind, :] = pallete[color_idx]
+        self.vis.add_points(f'superpoint: {n_spp}', self.point, tt_col, point_size=20, visible=True)
         print('---Done---')
     
     def gtviz(self, gt_data, specific = False):
@@ -193,69 +202,71 @@ class VisualizationScannet200:
         self.vis.add_points(f'feature: _', self.point, tt_col, point_size=20, visible=True)                
         print('---Done---')  
 
+def get_parser():
+    parser = argparse.ArgumentParser(description="Visualize STPLS3D superpoints and masks.")
+    parser.add_argument("--config", type=str, default="configs/stpls3d.yaml", help="Path to config yaml.")
+    parser.add_argument("--scene", type=str, required=True, help="Scene id to visualize.")
+    parser.add_argument("--spp-path", type=str, default=None, help="Optional explicit superpoint label path.")
+    parser.add_argument("--ply-root", type=str, default=None, help="Optional explicit original ply directory.")
+    parser.add_argument("--output-dir", type=str, default=None, help="PyViz3D output directory.")
+    parser.add_argument("--show-gt", action="store_true", help="Also visualize GT instances.")
+    parser.add_argument("--gt-path", type=str, default=None, help="Optional explicit GT file path.")
+    return parser
+
+
+def load_config(config_path):
+    with open(config_path, "r", encoding="utf-8") as handle:
+        return Munch.fromDict(yaml.safe_load(handle.read()))
+
+
+def resolve_superpoint_path(cfg, scene_id, explicit_path=None):
+    if explicit_path is not None:
+        return explicit_path
+    spp_root = None
+    if hasattr(cfg, "superpoint"):
+        spp_root = getattr(cfg.superpoint, "save_dir", None)
+        if spp_root is None:
+            spp_root = getattr(cfg.superpoint, "label_dir", None)
+    if spp_root is None:
+        spp_root = cfg.data.spp_path
+    pth_path = os.path.join(spp_root, f"{scene_id}.pth")
+    if os.path.exists(pth_path):
+        return pth_path
+    return os.path.join(spp_root, f"{scene_id}.pt")
+
+
+def resolve_gt_path(cfg, scene_id, explicit_path=None):
+    if explicit_path is not None:
+        return explicit_path
+    gt_root = getattr(cfg.data, "gt_pth", None)
+    if gt_root is None:
+        return None
+    ply_path = os.path.join(gt_root, f"{scene_id}.ply")
+    if os.path.exists(ply_path):
+        return ply_path
+    pth_path = os.path.join(gt_root, f"{scene_id}.pth")
+    if os.path.exists(pth_path):
+        return pth_path
+    return None
+
+
 if __name__ == "__main__":
-    
-    '''
-        Visualization using PyViz3D
-        1. superpoint visualization
-        2. ground-truth annotation
-        3. 3D backbone mask (isbnet, mask3d) -- class-agnostic
-        4. lifted 2D masks -- class-agnostic
-        5. final masks --class-agnostic (2D+3D)
-        
-    
-    '''
-    # Scene ID to visualize
-    # scene_id = '10_points_GTv3_01'
-    # scene_id = '20_points_GTv3_68'
-    # scene_id = '25_points_GTv3_55'
-    # scene_id = '05_points_GTv3_97'
-    scene_id = '10_points_GTv3_42'
-    # scene_id = '25_points_GTv3_99'
+    args = get_parser().parse_args()
+    cfg = load_config(args.config)
 
-    # scene_id = '25_points_GTv3_09'
+    scene_id = args.scene
+    spp_path = resolve_superpoint_path(cfg, scene_id, args.spp_path)
+    ply_root = args.ply_root or cfg.data.original_ply
+    gt_path = resolve_gt_path(cfg, scene_id, args.gt_path)
+    pyviz3d_dir = args.output_dir or os.path.join("viz", scene_id)
 
-
-    ##### The format follows the dataset tree
-    ## 1
-    check_superpointviz = True
-    spp_path = '/home/Data/data2/wcl/DataSet/STPLS3D_Open3DIS/3D/superpoints/' + scene_id + '.pt'
-    ## 2
-    check_gtviz = True
-    gt_path = '/home/Data/data2/wcl/DataSet/STPLS3D_Open3DIS/3D/groundtruth/' + scene_id + '.ply'
-    ## 3
-    check_3dviz = False
-    mask3d_path = './data/Scannet200/Scannet200_3D/val/isbnet_clsagnostic_scannet200/' + scene_id + '.pth'
-    ## 4
-    check_2dviz = True
-    # mask2d_path = '/home/Data/data2/wcl/Open3DIS/exp_stpls3d/version_SAM/hier_agglo_spp_dbscan/' + scene_id + '.pth'
-    mask2d_path = '/home/Data/data2/wcl/Open3DIS/exp_stpls3d/version_SAM/hier_agglo_spp_dbscan_test/' + scene_id + '.pth'
-    ## 5
-    check_finalviz = False
-    agnostic_path = '../exp/version_detic/final_result_hier_agglo/' + scene_id + '.pth'
-    # 6
-    check_featureviz = False
-    feature_path = '../exp/version_check/refined_grounded_feat/' + scene_id + '.pth'
-
-
-    pyviz3d_dir = '../viz' # visualization directory
-    # Visualize Point Cloud 
-    ply_file = '/home/Data/data2/wcl/DataSet/STPLS3D_Open3DIS/3D/original_ply_files'
-    point, color = read_pointcloud(os.path.join(ply_file,scene_id + '.ply'))
+    point, color = read_pointcloud(os.path.join(ply_root, scene_id + '.ply'))
     color = color * 127.5
 
-    VIZ = VisualizationScannet200(point, color)    
-    
-    if check_superpointviz:
-        VIZ.superpointviz(spp_path)
-    if check_gtviz:
-        VIZ.gtviz(gt_path, specific = False)
-    if check_3dviz:
-        VIZ.vizmask3d(mask3d_path, specific = False)
-    if check_2dviz:
-        VIZ.vizmask2d(mask2d_path, specific = False)
-    if check_finalviz:
-        VIZ.finalviz(agnostic_path, specific = False, vocab = False)
-    if check_featureviz:
-        VIZ.featureviz(feature_path)
+    VIZ = VisualizationScannet200(point, color)
+    VIZ.superpointviz(spp_path)
+    if args.show_gt:
+        if gt_path is None:
+            raise FileNotFoundError(f"Cannot resolve GT path for scene {scene_id}")
+        VIZ.gtviz(gt_path, specific=False)
     VIZ.save(pyviz3d_dir)
