@@ -2,17 +2,10 @@ import os
 
 import numpy as np
 import torch
-from segmenter3d.ISBNet.isbnet.util.rle import rle_decode
-from open3dis.dataset.scannet200 import INSTANCE_CAT_SCANNET_200
-from open3dis.dataset.scannetpp import SEMANTIC_CAT_SCANNET_PP, INSTANCE_BENCHMARK84_SCANNET_PP, SEMANTIC_INSTANCE_CAT_SCANNET_PP, INSTANCE_CAT_SCANNET_PP
-from scannetv2_inst_eval import ScanNetEval
 from tqdm import tqdm
 import argparse
 import yaml
 from munch import Munch
-
-from matterport3d_inst_eval import mattport3dEval
-from open3dis.dataset.matterport3d import INSTANCE_CAT_Matterport3d
 
 from stpls3d_inst_eval import stpls3dEval
 from open3dis.dataset_outdoor.stpls3d import INSTANCE_CAT_STPLS3D

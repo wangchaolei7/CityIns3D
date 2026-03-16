@@ -10,7 +10,7 @@ from util3d.utonia_superpoints import UtoniaSuperpointGenerator
 
 def get_parser():
     parser = argparse.ArgumentParser(
-        description="Generate Utonia superpoints with coarse voxels, feature+coord clustering, and connected-component split."
+        description="Generate Utonia superpoints with local voxel-graph over-segmentation."
     )
     parser.add_argument("--config", type=str, required=True, help="Path to config yaml.")
     parser.add_argument("--scene", type=str, default=None, help="Only process one scene id.")
@@ -57,6 +57,9 @@ def main():
             f"num_superpoints={stats['num_superpoints']} "
             f"noise={stats['num_noise_points']} "
             f"mode={stats['cluster_mode']} "
+            f"edges={stats.get('num_graph_edges', 0)} "
+            f"kept_edges={stats.get('num_kept_edges', 0)} "
+            f"small_merged={stats.get('num_small_merged', 0)} "
             f"saved_spp_feat={stats['used_saved_spp_feat']} "
             f"elapsed={elapsed:.2f}s"
         )

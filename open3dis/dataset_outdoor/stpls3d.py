@@ -1,6 +1,6 @@
 INSTANCE_CAT_STPLS3D = [
     "building",
-    "vegetation",
+    "tree",
     "vehicle",
     "truck",
     "aircraft",

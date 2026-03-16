@@ -1,56 +1,91 @@
 #!/bin/bash
-# Scannet200
-# dataset_cfg=${1:-'configs/scannet200_zbuffer.yaml'}
-# export PYTHONWARNINGS="ignore"
-# PYTHONPATH=./:$PYTHONPATH
-# export PYTHONPATH
-# CUDA_VISIBLE_DEVICES=0 python3 tools/generate_3d_inst_zbuffer.py --config $dataset_cfg
 
+set -u
 
-# Scannetpp
-# dataset_cfg=${1:-'configs/scannetpp_zbuffer.yaml'}
-# export PYTHONWARNINGS="ignore"
-# PYTHONPATH=./:$PYTHONPATH
-# export PYTHONPATH
-# CUDA_VISIBLE_DEVICES=0 python3 tools/generate_3d_inst_zbuffer.py --config $dataset_cfg
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+cd "${ROOT_DIR}"
 
+PIDS=()
+EXTRA_ARGS=()
 
-# Kitti360
-# dataset_cfg=${1:-'configs/kitti360_zbuffer.yaml'}
-# export PYTHONWARNINGS="ignore"
-# PYTHONPATH=./:$PYTHONPATH
-# export PYTHONPATH
-# CUDA_VISIBLE_DEVICES=0 python3 tools/generate_3d_inst_zbuffer.py --config $dataset_cfg
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-splitting)
+      EXTRA_ARGS+=("--disable-splitting")
+      shift
+      ;;
+    *)
+      EXTRA_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
 
-#----------------------------------------------------
-# Stpls3d 默认使用z_buffer生成深度
-# dataset_cfg=${1:-'configs/stpls3d.yaml'}
-# export PYTHONWARNINGS="ignore"
-# PYTHONPATH=./:$PYTHONPATH
-# export PYTHONPATH
-# CUDA_VISIBLE_DEVICES=1 python3 tools/generate_3d_inst_zbuffer.py --config $dataset_cfg
+start_task() {
+  local gpu_id="$1"
+  local config_path="$2"
 
+  echo "🚀 Starting GPU ${gpu_id} task..."
+  if command -v setsid >/dev/null 2>&1; then
+    setsid env \
+      CUDA_VISIBLE_DEVICES="${gpu_id}" \
+      PYTHONWARNINGS="ignore" \
+      PYTHONPATH="./:${PYTHONPATH:-}" \
+      python3 tools/generate_3d_inst_zbuffer.py --config "${config_path}" "${EXTRA_ARGS[@]}" &
+  else
+    env \
+      CUDA_VISIBLE_DEVICES="${gpu_id}" \
+      PYTHONWARNINGS="ignore" \
+      PYTHONPATH="./:${PYTHONPATH:-}" \
+      python3 tools/generate_3d_inst_zbuffer.py --config "${config_path}" "${EXTRA_ARGS[@]}" &
+  fi
+  PIDS+=("$!")
+}
 
-# 启动 GPU 0 任务
-echo "🚀 Starting GPU 0 task..."
-CUDA_VISIBLE_DEVICES=0 PYTHONWARNINGS="ignore" PYTHONPATH=./:$PYTHONPATH \
-python3 tools/generate_3d_inst_zbuffer.py --config configs/stpls3d.yaml &
+cleanup() {
+  trap - INT TERM HUP
 
-PID0=$!
+  for pid in "${PIDS[@]}"; do
+    [[ -z "${pid}" ]] && continue
+    if kill -0 "${pid}" 2>/dev/null; then
+      kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "${pid}" 2>/dev/null || true
+    fi
+  done
 
-# 启动 GPU 1 任务
-echo "🚀 Starting GPU 1 task..."
-CUDA_VISIBLE_DEVICES=1 PYTHONWARNINGS="ignore" PYTHONPATH=./:$PYTHONPATH \
-python3 tools/generate_3d_inst_zbuffer.py --config configs/stpls3d_1.yaml &
+  sleep 1
 
-PID1=$!
+  for pid in "${PIDS[@]}"; do
+    [[ -z "${pid}" ]] && continue
+    if kill -0 "${pid}" 2>/dev/null; then
+      kill -KILL -- "-${pid}" 2>/dev/null || kill -KILL "${pid}" 2>/dev/null || true
+    fi
+  done
 
-# 等待两个任务完成
-echo "⏳ Waiting for both tasks to complete..."
-wait $PID0
-echo "✅ GPU 0 task finished."
+  wait "${PIDS[@]}" 2>/dev/null || true
+}
 
-wait $PID1
-echo "✅ GPU 1 task finished."
+trap 'echo "⛔ Interrupt received. Stopping tasks..."; cleanup; exit 130' INT TERM HUP
+
+start_task 1 configs/stpls3d.yaml
+
+# start_task 1 configs/stpls3d_1.yaml
+
+echo "⏳ Waiting for tasks to complete..."
+
+status=0
+for pid in "${PIDS[@]}"; do
+  wait "${pid}"
+  rc=$?
+  if [[ "${rc}" -ne 0 ]]; then
+    status="${rc}"
+    break
+  fi
+done
+
+if [[ "${status}" -ne 0 ]]; then
+  cleanup
+  exit "${status}"
+fi
 
 echo "🎉 All done! Results saved in respective GPU directories."

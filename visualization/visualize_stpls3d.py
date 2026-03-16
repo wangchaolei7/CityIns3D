@@ -33,6 +33,24 @@ def rle_decode(rle):
         mask[lo:hi] = 1
     return mask
 
+
+def decode_rle_masks(mask_pack):
+    masks = mask_pack["ins"]
+    if isinstance(masks, torch.Tensor):
+        if masks.ndim == 1:
+            masks = masks.unsqueeze(0)
+        return masks.to(torch.bool)
+    if len(masks) == 0:
+        return torch.empty((0, mask_pack.get("length", 0)), dtype=torch.bool)
+    return torch.stack([torch.tensor(rle_decode(ins), dtype=torch.bool) for ins in masks], dim=0)
+
+
+def torch_load_local(path, map_location="cpu"):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
 def read_pointcloud(pcd_path):
     scene_pcd = o3d.io.read_point_cloud(str(pcd_path))
     point = np.asarray(scene_pcd.points)
@@ -63,7 +81,7 @@ class VisualizationScannet200:
     
     def superpointviz(self, spp_path):
         print('...Visualizing Superpoints...')
-        spp = torch.load(spp_path, map_location='cpu')
+        spp = torch_load_local(spp_path, map_location='cpu')
         if isinstance(spp, np.ndarray):
             spp = torch.from_numpy(spp)
         spp = spp.to(dtype=torch.int64)
@@ -91,7 +109,7 @@ class VisualizationScannet200:
             sem_label = np.asarray(vertex['semantic'], dtype=np.int32)
             ins_label = np.asarray(vertex['instance'], dtype=np.int32)
         else:
-            gt_pack = torch.load(gt_data)
+            gt_pack = torch_load_local(gt_data, map_location='cpu')
             if isinstance(gt_pack, (list, tuple)) and len(gt_pack) == 4:
                 _, _, sem_label, ins_label = gt_pack
             else:
@@ -118,13 +136,13 @@ class VisualizationScannet200:
 
     def vizmask3d(self, mask3d_path, specific = False):
         print('...Visualizing 3D backbone mask...')
-        dic = torch.load(mask3d_path)
-        instance = dic['ins']
-        try:
-            instance = torch.stack([torch.tensor(rle_decode(ins)) for ins in instance])
-        except:
-            pass
+        dic = torch_load_local(mask3d_path, map_location='cpu')
+        instance = decode_rle_masks(dic)
         conf3d = dic['conf']
+        if instance.shape[0] == 0:
+            self.vis.add_points('3D backbone mask: 0', self.point, self.color.copy(), point_size=20, visible=True)
+            print('---Done (empty)---')
+            return
         pallete =  generate_palette(int(2e3 + 1))
         tt_col = self.color.copy()
         limit = 10
@@ -141,10 +159,13 @@ class VisualizationScannet200:
 
     def vizmask2d(self, mask2d_path, specific = False):
         print('...Visualizing 2D lifted mask...')
-        dic = torch.load(mask2d_path)
-        instance = dic['ins']
-        instance = torch.stack([torch.tensor(rle_decode(ins)) for ins in instance])
+        dic = torch_load_local(mask2d_path, map_location='cpu')
+        instance = decode_rle_masks(dic)
         conf2d = dic['conf'] # confidence really doesn't affect much (large mask -> small conf)
+        if instance.shape[0] == 0:
+            self.vis.add_points('2D lifted mask: 0', self.point, self.color.copy(), point_size=20, visible=True)
+            print('---Done (empty)---')
+            return
         pallete =  generate_palette(int(5e3 + 1))
         tt_col = self.color.copy()
         limit = 10
@@ -161,10 +182,13 @@ class VisualizationScannet200:
         
     def finalviz(self, agnostic_path, specific = False, vocab = False):
         print('...Visualizing final class agnostic mask...')
-        dic = torch.load(agnostic_path)
-        instance = dic['ins']
-        instance = torch.stack([torch.tensor(rle_decode(ins)) for ins in instance])
+        dic = torch_load_local(agnostic_path, map_location='cpu')
+        instance = decode_rle_masks(dic)
         conf2d = dic['conf'] # confidence really doesn't affect much (large mask -> small conf)
+        if instance.shape[0] == 0:
+            self.vis.add_points('final mask: 0', self.point, self.color.copy(), point_size=20, visible=True)
+            print('---Done (empty)---')
+            return
 
         if vocab == True:
             label = dic['final_class']
@@ -188,7 +212,7 @@ class VisualizationScannet200:
     def featureviz(self, feature_path):
         print('...Visualizing final class agnostic mask...')
         # breakpoint()
-        dic = torch.load(feature_path)['feat']
+        dic = torch_load_local(feature_path, map_location='cpu')['feat']
         pallete =  generate_palette(int(2e3 + 1))
         tt_col = self.color.copy()
         feat = torch.mean(dic, dim = -1)
@@ -207,10 +231,17 @@ def get_parser():
     parser.add_argument("--config", type=str, default="configs/stpls3d.yaml", help="Path to config yaml.")
     parser.add_argument("--scene", type=str, required=True, help="Scene id to visualize.")
     parser.add_argument("--spp-path", type=str, default=None, help="Optional explicit superpoint label path.")
+    parser.add_argument("--lifted-path", type=str, default=None, help="Optional explicit 2D-lifted proposal path.")
+    parser.add_argument("--final-path", type=str, default=None, help="Optional explicit final proposal path.")
     parser.add_argument("--ply-root", type=str, default=None, help="Optional explicit original ply directory.")
     parser.add_argument("--output-dir", type=str, default=None, help="PyViz3D output directory.")
+    parser.add_argument("--show-spp", action="store_true", help="Visualize superpoint labels.")
+    parser.add_argument("--show-lifted", action="store_true", help="Visualize 2D-lifted 3D proposals.")
+    parser.add_argument("--show-final", action="store_true", help="Visualize final merged masks.")
     parser.add_argument("--show-gt", action="store_true", help="Also visualize GT instances.")
     parser.add_argument("--gt-path", type=str, default=None, help="Optional explicit GT file path.")
+    parser.add_argument("--specific-lifted", action="store_true", help="Show individual 2D-lifted proposals as separate layers.")
+    parser.add_argument("--specific-final", action="store_true", help="Show individual final proposals as separate layers.")
     return parser
 
 
@@ -223,10 +254,10 @@ def resolve_superpoint_path(cfg, scene_id, explicit_path=None):
     if explicit_path is not None:
         return explicit_path
     spp_root = None
-    if hasattr(cfg, "superpoint"):
-        spp_root = getattr(cfg.superpoint, "save_dir", None)
-        if spp_root is None:
-            spp_root = getattr(cfg.superpoint, "label_dir", None)
+    # if hasattr(cfg, "superpoint"):
+    #     spp_root = getattr(cfg.superpoint, "save_dir", None)
+    #     if spp_root is None:
+    #         spp_root = getattr(cfg.superpoint, "label_dir", None)
     if spp_root is None:
         spp_root = cfg.data.spp_path
     pth_path = os.path.join(spp_root, f"{scene_id}.pth")
@@ -250,12 +281,28 @@ def resolve_gt_path(cfg, scene_id, explicit_path=None):
     return None
 
 
+def resolve_cluster_output_path(cfg, scene_id, explicit_path=None):
+    if explicit_path is not None:
+        return explicit_path
+    output_root = os.path.join(cfg.exp.save_dir, cfg.exp.exp_name, cfg.exp.clustering_3d_output)
+    return os.path.join(output_root, f"{scene_id}.pth")
+
+
+def resolve_final_output_path(cfg, scene_id, explicit_path=None):
+    if explicit_path is not None:
+        return explicit_path
+    output_root = os.path.join(cfg.exp.save_dir, cfg.exp.exp_name, cfg.exp.final_output)
+    return os.path.join(output_root, f"{scene_id}.pth")
+
+
 if __name__ == "__main__":
     args = get_parser().parse_args()
     cfg = load_config(args.config)
 
     scene_id = args.scene
     spp_path = resolve_superpoint_path(cfg, scene_id, args.spp_path)
+    lifted_path = resolve_cluster_output_path(cfg, scene_id, args.lifted_path)
+    final_path = resolve_final_output_path(cfg, scene_id, args.final_path)
     ply_root = args.ply_root or cfg.data.original_ply
     gt_path = resolve_gt_path(cfg, scene_id, args.gt_path)
     pyviz3d_dir = args.output_dir or os.path.join("viz", scene_id)
@@ -264,7 +311,21 @@ if __name__ == "__main__":
     color = color * 127.5
 
     VIZ = VisualizationScannet200(point, color)
+
+    print(spp_path)
     VIZ.superpointviz(spp_path)
+    VIZ.vizmask2d(lifted_path, specific=args.specific_lifted)
+    
+    if args.show_spp:
+        VIZ.superpointviz(spp_path)
+    if args.show_lifted:
+        if not os.path.exists(lifted_path):
+            raise FileNotFoundError(f"Cannot resolve 2D-lifted path for scene {scene_id}: {lifted_path}")
+        VIZ.vizmask2d(lifted_path, specific=args.specific_lifted)
+    if args.show_final:
+        if not os.path.exists(final_path):
+            raise FileNotFoundError(f"Cannot resolve final mask path for scene {scene_id}: {final_path}")
+        VIZ.finalviz(final_path, specific=args.specific_final)
     if args.show_gt:
         if gt_path is None:
             raise FileNotFoundError(f"Cannot resolve GT path for scene {scene_id}")

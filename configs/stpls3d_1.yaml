@@ -33,6 +33,7 @@ foundation_model:
   utonia_superpoint_upcast_levels: 2
   utonia_output_dtype: 'float16'
   utonia_fallback_patch_size: 1024
+  tgc_repo_path: './segmenter3d/torch-graph-components/src'
   # CLIP
   clip_model: 'ViT-L/14@336px'
   device: 'cuda'
@@ -62,7 +63,7 @@ data:
   datapath: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/2D' # RGB-D + pose path
   gt_pth: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/groundtruth' # gt path
   original_ply: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/original_ply_files' # raw pcl
-  spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/utonia_superpoints_hdbscan_dotassign' # spp path
+  spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/utonia_superpoints' # point-wise spp labels
   point_features_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/utonia_point_features' # point-level feature path
   cls_agnostic_3d_proposals_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/isbnet_clsagnostic_scannet200' # cls agnostic 3D proposals
   dc_features_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/sppfeatures' # spp feature path
@@ -73,9 +74,16 @@ data:
   num_classes: 12
 
 superpoint:
-  method: 'utonia_voxel_prototype'
+  method: 'utonia_voxel_graph_overseg'
   save_dir: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/utonia_superpoints'
-  proto_grid_size: 0.5
+  proto_grid_size: 0.2
+  graph_connectivity: 6
+  graph_feature_threshold: 0.78
+  graph_merge_small_components: True
+  graph_min_component_voxels: 3
+  graph_min_component_points: 64
+  graph_merge_sim_threshold: 0.72
+  graph_edge_chunk_size: 262144
   cluster_method: 'hdbscan'
   hdbscan_min_cluster_size: 20
   hdbscan_min_samples: 10
@@ -86,6 +94,33 @@ superpoint:
   assignment_chunk_size: 32768
   fallback_num_prototypes: 256
   component_connectivity: 6
+  tgc_native_output_dir: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_native'
+  tgc_utonia_output_dir: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_utonia'
+  tgc_voxel_size: 0.1
+  tgc_native_voxel_size: 0.25
+  tgc_utonia_voxel_size: 0.2
+  tgc_graph_connectivity: 6
+  tgc_reg: 1.0
+  tgc_native_reg: 5.0
+  tgc_utonia_reg: 1.0
+  tgc_min_size: 64
+  tgc_native_min_size: 256
+  tgc_utonia_min_size: 128
+  tgc_merge_only_small: False
+  tgc_k: -1
+  tgc_native_k: 4
+  tgc_utonia_k: -1
+  tgc_w_adjacency: -1.0
+  tgc_native_w_adjacency: 1.0
+  tgc_utonia_w_adjacency: -1.0
+  tgc_sharding: 0.25
+  tgc_reduce: 'add'
+  tgc_native_color_weight: 1.0
+  tgc_native_coord_weight: 0.25
+  tgc_utonia_pca_dim: 16
+  tgc_utonia_pca_fit_samples: 20000
+  tgc_utonia_edge_weight_mode: 'similarity'
+  tgc_utonia_edge_weight_floor: 0.05
 
 cluster:
   visi: 0.9 # iou
@@ -93,6 +128,24 @@ cluster:
   simi: 0.9 # dc_feats
   point_visi: 0.2  #0.2
   valid_points: 50
+  enable_splitting: True
+  split_method: 'dbscan'
+  split_dbscan_eps: 0.5
+  split_dbscan_min_samples: 50
+  split_hdbscan_min_cluster_size: 50
+  split_hdbscan_min_samples: 20
+  split_cluster_min_points: 50
+  grow_feature_threshold: 0.6
+  grow_min_seed_overlap: 0.5
+  grow_use_geometry: False
+  grow_centroid_dist_threshold: 1.5
+  update_seed_stats: False
+  merge_feature_veto: True
+  merge_feature_veto_threshold: 0.3
+  spp_graph_mode: 'point_knn'
+  spp_graph_k: 8
+  spp_graph_max_neighbor_dist:
+  feature_pool_chunk_size: 64
 
 refine_grounding:
   top_k: 5 #⭐从5修改到2

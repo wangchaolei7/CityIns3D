@@ -8,13 +8,10 @@ import cv2
 import numpy as np
 import open3d as o3d
 import pycocotools
-import pyviz3d.visualizer as viz
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_scatter
-from open3dis.dataset.scannet200 import INSTANCE_CAT_SCANNET_200
-from open3dis.dataset.scannet_loader import ScanNetReader, scaling_mapping
 from open3dis.dataset_outdoor import build_dataset
 from open3dis.src.clustering.clustering_utils import (
     compute_projected_pts,
@@ -30,7 +27,6 @@ from open3dis.src.clustering.clustering_utils import (
     read_detectron_instances,
     resolve_overlapping_masks,
 )
-from open3dis.src.fusion_util import NMS_cuda
 # from open3dis.src.mapper_zbuffer import PointCloudToImageMapper, generate_depth_from_z_buffer # for kitti360
 from open3dis.src.mapper_zbuffer import PointCloudToImageMapper
 from PIL import Image, ImageDraw, ImageFont
@@ -43,7 +39,17 @@ import matplotlib.pyplot as plt
 import pickle
 
 ### ablation study 
-from open3dis.src.clustering.geometry_grow_stpls3d import vccs_grow_spp, vccs_growspp_dbscan, vccs_growspp_hdbscan
+from open3dis.src.clustering.geometry_grow_stpls3d import (
+    aggregate_spp_features,
+    build_spp_adjacency_point_knn,
+    build_spp_members,
+    compute_proposal_features_from_spp,
+    grow_split_clusters_with_utonia,
+    split_projected_clusters,
+    vccs_grow_spp,
+    vccs_growspp_dbscan,
+    vccs_growspp_hdbscan,
+)
 
 # ---------------- IO helpers for exporting results ----------------
 def _ensure_dir(path):
@@ -121,16 +127,15 @@ def hierarchical_agglomerative_clustering_growspp_stpls3d(
     points=None,
     spp=None,
     n_spp=None,
-    edge_index_spp=None,
-    edge_features=None,
-    node_features=None,
-    centroid=None,
-    rgb_mean=None,
+    spp_neighbors=None,
+    spp_members=None,
+    spp_features=None,
+    spp_centroids=None,
     save_intermediate_dir=None,
     spp_total_counts_global=None,
+    cluster_cfg=None,
     update_seed_stats=True,
 ):
-    # global num_point, dc_feature_matrix, dc_feature_spp
     '''
     point accumulation:
     view accumulation:
@@ -140,154 +145,98 @@ def hierarchical_agglomerative_clustering_growspp_stpls3d(
         return []
     if left == right:
         device = 'cuda'
-        # Graph initialization
         index = left
 
         if pcd_list[index]["masks"] is None:
             return []
-        
+
         masks = pcd_list[index]["masks"].cuda()
         mapping = pcd_list[index]["mapping"].cuda()
-        image_dim_hw = pcd_list[index]["image_dim"]
-        frame_tag = pcd_list[index].get("frame_id", index)
-        total_spp_points = torch_scatter.scatter((mapping[:, 3] == 1).float(), spp, dim=0, reduce="sum")
-        # total_spp_points_visible = torch_scatter.scatter((mapping[:, 3] == 1).float(), spp, dim=0, reduce="sum")
 
-        ### Per mask processing
         mask3d = []
-        highlight_indices = set() ### line：1181
+        enable_splitting = bool(
+            getattr(cluster_cfg, "enable_splitting", True) if cluster_cfg is not None else True
+        )
+        split_method = getattr(cluster_cfg, "split_method", "dbscan") if cluster_cfg is not None else "dbscan"
+        split_dbscan_eps = float(
+            getattr(cluster_cfg, "split_dbscan_eps", 0.5) if cluster_cfg is not None else 0.5
+        )
+        split_dbscan_min_samples = int(
+            getattr(cluster_cfg, "split_dbscan_min_samples", 50) if cluster_cfg is not None else 50
+        )
+        split_hdbscan_min_cluster_size = int(
+            getattr(cluster_cfg, "split_hdbscan_min_cluster_size", 50) if cluster_cfg is not None else 50
+        )
+        split_hdbscan_min_samples = int(
+            getattr(cluster_cfg, "split_hdbscan_min_samples", 20) if cluster_cfg is not None else 20
+        )
+        split_cluster_min_points = int(
+            getattr(cluster_cfg, "split_cluster_min_points", 50) if cluster_cfg is not None else 50
+        )
+        grow_feature_threshold = float(
+            getattr(cluster_cfg, "grow_feature_threshold", getattr(cluster_cfg, "simi", 0.6))
+            if cluster_cfg is not None
+            else 0.6
+        )
+        grow_min_seed_overlap = float(
+            getattr(cluster_cfg, "grow_min_seed_overlap", 0.5) if cluster_cfg is not None else 0.5
+        )
+        grow_use_geometry = bool(
+            getattr(cluster_cfg, "grow_use_geometry", False) if cluster_cfg is not None else False
+        )
+        grow_centroid_dist_threshold = float(
+            getattr(cluster_cfg, "grow_centroid_dist_threshold", 1.5)
+            if cluster_cfg is not None
+            else 1.5
+        )
 
         for m, mask in enumerate(masks):
             idx = torch.nonzero(mapping[:, 3] == 1).view(-1)
             highlight_points = idx[
                 mask[mapping[idx][:, [1, 2]][:, 0], mapping[idx][:, [1, 2]][:, 1]].nonzero(as_tuple=True)[0]
             ].long()
-            highlight_indices.update(highlight_points.cpu().numpy().tolist())
-
-            # 额外保存：图切之前，mask 投影命中的原始点云坐标（每个 mask 单独保存）
-            # if save_intermediate_dir is not None:
-            #     try:
-            #         _ensure_dir(save_intermediate_dir)
-            #         if highlight_points.numel() > 0 and points is not None:
-            #             _save_points_txt(
-            #                 points[highlight_points],
-            #                 os.path.join(save_intermediate_dir, f"frame_{frame_tag}_mask_{m}_projected_points_precut.txt"),
-            #             )
-
-            #         mask_np = mask.cpu().numpy().astype(np.uint8)
-            #         mask_np *= 255
-            #         mask_image = Image.fromarray(mask_np, mode='L')
-            #         image_save_path = os.path.join(save_intermediate_dir, f"frame_{frame_tag}_mask_{m}_image.png")
-            #         mask_image.save(image_save_path)
-            #     except Exception:
-            #         pass
-
-            sieve_mask = torch.zeros((n_points), device=device)
-            sieve_mask[highlight_points] = 1
-
-            num_related_points = torch_scatter.scatter(sieve_mask.float(), spp, dim=0, reduce="sum")
-            ##### spp和mask的重叠度iou 原版
-            spp_weights = torch.zeros((n_spp), dtype=torch.float32, device=device)
-            spp_weights = torch.where(
-                total_spp_points==0, 0, num_related_points / total_spp_points
-            )
-            target_spp = torch.nonzero(spp_weights >= 0.5).view(-1)
-
-            # 新版：增加双约束，提升鲁棒性
-            # spp_weights_visible = torch.zeros((n_spp), dtype=torch.float32, device=device)
-            # spp_weights_visible = torch.where(
-            #     total_spp_points_visible > 0, 
-            #     num_related_points / total_spp_points_visible, 
-            #     0
-            # )
-            # mask_constraint_A = (spp_weights_visible >= 0.1)
-            
-            # # --- 约束B: 全局重叠度或绝对数量 ---
-            # # B1: 命中点数 / 超点总点数
-            # spp_weights_global = torch.zeros((n_spp), dtype=torch.float32, device=device)
-            # spp_weights_global = torch.where(
-            #     spp_total_counts_global > 0,
-            #     num_related_points / spp_total_counts_global,
-            #     0
-            # )
-            # mask_constraint_B1 = (spp_weights_global >= 0.1)
-            
-            # # B2: 命中点数
-            # mask_constraint_B2 = (num_related_points >= 30)
-            
-            # # 组合约束B: 满足 B1 或 B2 均可
-            # mask_constraint_B = mask_constraint_B1 | mask_constraint_B2
-            
-            # # --- 最终裁决: 必须同时满足 约束A 和 约束B ---
-            # final_mask = mask_constraint_A & mask_constraint_B
-            # target_spp = torch.nonzero(final_mask).view(-1)
-
-
-
-            ##### spp和mask的重叠度点数
-            # target_spp = torch.nonzero(num_related_points > 0).view(-1)
-            if len(highlight_points) <= 10:
+            if highlight_points.numel() <= 10:
                 continue
 
-            group_tmp = vccs_growspp_dbscan(
-            # group_tmp = vccs_growspp_hdbscan(
-                highlight_points,
-                points,
-                spp,
-                target_spp,
-                edge_index=edge_index_spp,
-                node_features=node_features,
-                rgb_mean=rgb_mean,
-                spp_counts=spp_total_counts_global,
-                update_seed_stats=update_seed_stats,
-            )
-
-            if isinstance(group_tmp, list):
-                if len(group_tmp) == 0:
-                    continue
-                group_tmp = torch.stack(group_tmp, dim=0)
-            elif isinstance(group_tmp, torch.Tensor):
-                if group_tmp.dim() == 1:
-                    group_tmp = group_tmp.unsqueeze(0)
+            if enable_splitting:
+                split_clusters = split_projected_clusters(
+                    highlight_points,
+                    points,
+                    method=split_method,
+                    dbscan_eps=split_dbscan_eps,
+                    dbscan_min_samples=split_dbscan_min_samples,
+                    hdbscan_min_cluster_size=split_hdbscan_min_cluster_size,
+                    hdbscan_min_samples=split_hdbscan_min_samples,
+                    cluster_min_points=split_cluster_min_points,
+                )
             else:
+                split_clusters = [highlight_points]
+            group_tmp = grow_split_clusters_with_utonia(
+                split_clusters,
+                n_points=n_points,
+                spp=spp,
+                spp_members=spp_members,
+                spp_neighbors=spp_neighbors,
+                spp_features=spp_features,
+                spp_centroids=spp_centroids,
+                spp_counts=spp_total_counts_global,
+                grow_feature_threshold=grow_feature_threshold,
+                grow_min_seed_overlap=grow_min_seed_overlap,
+                grow_use_geometry=grow_use_geometry,
+                grow_centroid_dist_threshold=grow_centroid_dist_threshold,
+                grow_update_region_stats=update_seed_stats,
+            )
+
+            if not group_tmp:
                 continue
 
-            group_tmp = group_tmp.to(torch.int8)
-
+            group_tmp = torch.stack(group_tmp, dim=0).to(torch.int8)
             point_acc[highlight_points] += 1
             mask3d.append(group_tmp)
-
-            # 保存每个mask在该帧的中间结果：属于该mask的点坐标（原始点云坐标）
-            # if save_intermediate_dir is not None:
-            #     try:
-            #         _ensure_dir(save_intermediate_dir)
-            #         idx_member = torch.nonzero(group_tmp.sum(dim=0)).view(-1)
-            #         if idx_member.numel() > 0 and points is not None:
-            #             pts_member = points[idx_member]
-            #             _save_points_txt(
-            #                 pts_member,
-            #                 os.path.join(save_intermediate_dir, f"frame_{frame_tag}_mask_{m}_points.txt"),
-            #             )
-            #     except Exception:
-            #         pass
 
         if len(mask3d) == 0:
             return []
         mask3d = torch.cat(mask3d, dim=0)
-
-        # 保存该帧汇总的高亮（投影命中）点坐标（原始点云坐标）
-        # if save_intermediate_dir is not None:
-        #     try:
-        #         _ensure_dir(save_intermediate_dir)
-        #         if len(highlight_indices) > 0 and points is not None:
-        #             idx_tensor = torch.tensor(sorted(list(highlight_indices)), dtype=torch.long, device=points.device)
-        #             pts_highlight = points[idx_tensor]
-        #             _save_points_txt(
-        #                 pts_highlight,
-        #                 os.path.join(save_intermediate_dir, f"frame_{frame_tag}_highlight_points.txt"),
-        #             )
-        #     except Exception:
-        #         pass
         return mask3d
 
     mid = int((left + right) / 2)
@@ -304,13 +253,13 @@ def hierarchical_agglomerative_clustering_growspp_stpls3d(
         points=points,
         spp=spp,
         n_spp=n_spp,
-        edge_index_spp=edge_index_spp,
-        edge_features=edge_features,
-        node_features=node_features,
-        centroid=centroid,
-        rgb_mean=rgb_mean,
+        spp_neighbors=spp_neighbors,
+        spp_members=spp_members,
+        spp_features=spp_features,
+        spp_centroids=spp_centroids,
         save_intermediate_dir=save_intermediate_dir,
         spp_total_counts_global=spp_total_counts_global,
+        cluster_cfg=cluster_cfg,
         update_seed_stats=update_seed_stats,
     )
     graph_2_onehot = hierarchical_agglomerative_clustering_growspp_stpls3d(
@@ -326,13 +275,13 @@ def hierarchical_agglomerative_clustering_growspp_stpls3d(
         points=points,
         spp=spp,
         n_spp=n_spp,
-        edge_index_spp=edge_index_spp,
-        edge_features=edge_features,
-        node_features=node_features,
-        centroid=centroid,
-        rgb_mean=rgb_mean,
+        spp_neighbors=spp_neighbors,
+        spp_members=spp_members,
+        spp_features=spp_features,
+        spp_centroids=spp_centroids,
         save_intermediate_dir=save_intermediate_dir,
         spp_total_counts_global=spp_total_counts_global,
+        cluster_cfg=cluster_cfg,
         update_seed_stats=update_seed_stats,
     )
 
@@ -349,22 +298,41 @@ def hierarchical_agglomerative_clustering_growspp_stpls3d(
         new_graph = torch.cat([graph_1_onehot, graph_2_onehot], dim=0)
 
         iou_matrix, _, recall_matrix = compute_relation_matrix_self_mem(new_graph)
-        
-        #####
-        import math
         visi = ious_level[min(int(math.floor(level // inter)), len(ious_level) - 1)]
         adjacency_matrix = (iou_matrix >= visi)
-        adjacency_matrix |= (recall_matrix >= 0.98)    
-
+        merge_recall = float(
+            getattr(cluster_cfg, "recall", 0.98) if cluster_cfg is not None else 0.98
+        )
+        adjacency_matrix |= (recall_matrix >= merge_recall)
         adjacency_matrix = adjacency_matrix | adjacency_matrix.T
-        #####
 
-        # if adjacency_matrix
+        if bool(getattr(cluster_cfg, "merge_feature_veto", True) if cluster_cfg is not None else True):
+            veto_threshold = float(
+                getattr(
+                    cluster_cfg,
+                    "merge_feature_veto_threshold",
+                    getattr(cluster_cfg, "simi", 0.3) if cluster_cfg is not None else 0.3,
+                )
+            )
+            proposal_feat = compute_proposal_features_from_spp(
+                new_graph.bool(),
+                spp,
+                n_spp,
+                spp_features,
+                chunk_size=int(
+                    getattr(cluster_cfg, "feature_pool_chunk_size", 64)
+                    if cluster_cfg is not None
+                    else 64
+                ),
+            )
+            feature_sim = proposal_feat @ proposal_feat.T
+            feature_ok = feature_sim >= veto_threshold
+            eye = torch.eye(feature_ok.shape[0], dtype=torch.bool, device=feature_ok.device)
+            adjacency_matrix &= (feature_ok | eye)
+
         if adjacency_matrix.sum() == new_graph.shape[0]:
             return new_graph
 
-        # merge instances based on the adjacency matrix
-        
         connected_components = find_connected_components(adjacency_matrix)
         M = len(connected_components)
         merged_instance = torch.zeros((M, graph_2_onehot.shape[1]), dtype=torch.int8, device=graph_2_onehot.device)
@@ -374,229 +342,6 @@ def hierarchical_agglomerative_clustering_growspp_stpls3d(
         new_graph = merged_instance
 
         print(f'-----正在进行第{left}--{right}帧图像合并-----')
-        return new_graph
-
-def hierarchical_agglomerative_clustering_growspp_stpls3d_nogrow(
-    pcd_list,
-    left,
-    right,
-    n_points,
-    ious_level,
-    level,
-    inter,
-    point_acc,
-    iterative=True,
-    points=None,
-    spp=None,
-    n_spp=None,
-    edge_index_spp=None,
-    edge_features=None,
-    node_features=None,
-    centroid=None,
-    rgb_mean=None,
-    save_intermediate_dir=None,
-    spp_total_counts_global=None,
-):
-    '''
-    No-grow variant: after 2D mask projection, skip SPP graph-cut growth.
-    Directly uses projected hits (highlight_points) to build group_tmp and
-    appends to mask3d. All other logic mirrors the original function.
-    '''
-    if left > right:
-        return []
-    if left == right:
-        device = 'cuda'
-        index = left
-
-        if pcd_list[index]["masks"] is None:
-            return []
-
-        masks = pcd_list[index]["masks"].cuda()
-        mapping = pcd_list[index]["mapping"].cuda()
-        image_dim_hw = pcd_list[index]["image_dim"]
-        frame_tag = pcd_list[index].get("frame_id", index)
-        total_spp_points_visible = torch_scatter.scatter((mapping[:, 3] == 1).float(), spp, dim=0, reduce="sum")
-
-        mask3d = []
-        highlight_indices = set()
-
-        for m, mask in enumerate(masks):
-            idx = torch.nonzero(mapping[:, 3] == 1).view(-1)
-            highlight_points = idx[
-                mask[mapping[idx][:, [1, 2]][:, 0], mapping[idx][:, [1, 2]][:, 1]].nonzero(as_tuple=True)[0]
-            ].long()
-            highlight_indices.update(highlight_points.cpu().numpy().tolist())
-
-            # if save_intermediate_dir is not None:
-            #     try:
-            #         _ensure_dir(save_intermediate_dir)
-            #         if highlight_points.numel() > 0 and points is not None:
-            #             _save_points_txt(
-            #                 points[highlight_points],
-            #                 os.path.join(save_intermediate_dir, f"frame_{frame_tag}_mask_{m}_projected_points_precut.txt"),
-            #             )
-
-            #         mask_np = mask.cpu().numpy().astype(np.uint8)
-            #         mask_np *= 255
-            #         mask_image = Image.fromarray(mask_np, mode='L')
-            #         image_save_path = os.path.join(save_intermediate_dir, f"frame_{frame_tag}_mask_{m}_image.png")
-            #         mask_image.save(image_save_path)
-            #     except Exception:
-            #         pass
-
-            sieve_mask = torch.zeros((n_points), device=device)
-            sieve_mask[highlight_points] = 1
-
-            num_related_points = torch_scatter.scatter(sieve_mask.float(), spp, dim=0, reduce="sum")
-
-            spp_weights_visible = torch.zeros((n_spp), dtype=torch.float32, device=device)
-            spp_weights_visible = torch.where(
-                total_spp_points_visible > 0,
-                num_related_points / total_spp_points_visible,
-                0
-            )
-            mask_constraint_A = (spp_weights_visible >= 0.5)
-
-            spp_weights_global = torch.zeros((n_spp), dtype=torch.float32, device=device)
-            spp_weights_global = torch.where(
-                spp_total_counts_global > 0,
-                num_related_points / spp_total_counts_global,
-                0
-            )
-            mask_constraint_B1 = (spp_weights_global >= 0.5)
-            mask_constraint_B2 = (num_related_points >= 30)
-            mask_constraint_B = mask_constraint_B1 | mask_constraint_B2
-            final_mask = mask_constraint_A & mask_constraint_B
-            target_spp = torch.nonzero(final_mask).view(-1)
-
-            if len(highlight_points) <= 10:
-                continue
-
-            # No-grow: directly build group mask from projected hits
-            group_points_mask = torch.zeros((n_points,), dtype=torch.int8, device=device)
-            if highlight_points.numel() > 0:
-                group_points_mask[highlight_points] = 1
-            group_tmp = group_points_mask.unsqueeze(0)
-
-            group_tmp = vccs_grow_spp(highlight_points, points, spp, target_spp, dc_feature_spp, dc_feature)
-            # prevent returning an empty list
-            if isinstance(group_tmp, list):
-                if len(group_tmp) > 0:
-                    group_tmp = torch.stack(group_tmp, dim=0)
-                else:
-                    group_tmp = torch.zeros((1, n_points), dtype=torch.int8, device=device)
-
-            point_acc[highlight_points] += 1
-            mask3d.append(group_tmp)
-
-            # if save_intermediate_dir is not None:
-            #     try:
-            #         _ensure_dir(save_intermediate_dir)
-            #         idx_member = highlight_points
-            #         if idx_member.numel() > 0 and points is not None:
-            #             pts_member = points[idx_member]
-            #             _save_points_txt(
-            #                 pts_member,
-            #                 os.path.join(save_intermediate_dir, f"frame_{frame_tag}_mask_{m}_points.txt"),
-            #             )
-            #     except Exception:
-            #         pass
-
-        if len(mask3d) == 0:
-            return []
-        mask3d = torch.cat(mask3d, dim=0)
-
-        # if save_intermediate_dir is not None:
-        #     try:
-        #         _ensure_dir(save_intermediate_dir)
-        #         if len(highlight_indices) > 0 and points is not None:
-        #             idx_tensor = torch.tensor(sorted(list(highlight_indices)), dtype=torch.long, device=points.device)
-        #             pts_highlight = points[idx_tensor]
-        #             _save_points_txt(
-        #                 pts_highlight,
-        #                 os.path.join(save_intermediate_dir, f"frame_{frame_tag}_highlight_points.txt"),
-        #             )
-        #     except Exception:
-        #         pass
-        return mask3d
-
-    mid = int((left + right) / 2)
-    graph_1_onehot = hierarchical_agglomerative_clustering_growspp_stpls3d_nogrow(
-        pcd_list,
-        left,
-        mid,
-        n_points,
-        ious_level,
-        level + 1,
-        inter,
-        point_acc,
-        iterative=iterative,
-        points=points,
-        spp=spp,
-        n_spp=n_spp,
-        edge_index_spp=edge_index_spp,
-        edge_features=edge_features,
-        node_features=node_features,
-        centroid=centroid,
-        rgb_mean=rgb_mean,
-        save_intermediate_dir=save_intermediate_dir,
-        spp_total_counts_global=spp_total_counts_global,
-    )
-    graph_2_onehot = hierarchical_agglomerative_clustering_growspp_stpls3d_nogrow(
-        pcd_list,
-        mid + 1,
-        right,
-        n_points,
-        ious_level,
-        level + 1,
-        inter,
-        point_acc,
-        iterative=iterative,
-        points=points,
-        spp=spp,
-        n_spp=n_spp,
-        edge_index_spp=edge_index_spp,
-        edge_features=edge_features,
-        node_features=node_features,
-        centroid=centroid,
-        rgb_mean=rgb_mean,
-        save_intermediate_dir=save_intermediate_dir,
-        spp_total_counts_global=spp_total_counts_global,
-    )
-
-    if len(graph_1_onehot) == 0 and len(graph_2_onehot) == 0:
-        return []
-
-    if len(graph_1_onehot) == 0:
-        return graph_2_onehot
-
-    if len(graph_2_onehot) == 0:
-        return graph_1_onehot
-
-    if iterative:
-        new_graph = torch.cat([graph_1_onehot, graph_2_onehot], dim=0)
-
-        iou_matrix, _, recall_matrix = compute_relation_matrix_self_mem(new_graph)
-
-        import math
-        visi = ious_level[min(int(math.floor(level // inter)), len(ious_level) - 1)]
-        adjacency_matrix = (iou_matrix >= visi)
-        adjacency_matrix |= (recall_matrix >= 0.95)
-
-        adjacency_matrix = adjacency_matrix | adjacency_matrix.T
-
-        if adjacency_matrix.sum() == new_graph.shape[0]:
-            return new_graph
-
-        connected_components = find_connected_components(adjacency_matrix)
-        M = len(connected_components)
-        merged_instance = torch.zeros((M, graph_2_onehot.shape[1]), dtype=torch.int8, device=graph_2_onehot.device)
-        for i, cluster in enumerate(connected_components):
-            merged_instance[i] = new_graph[cluster].sum(0)
-
-        new_graph = merged_instance
-
-        # print(f'-----正在进行第{left}--{right}帧图像合并(无增长)-----')
         return new_graph
 
 def process_hierarchical_agglomerative_growspp_stpls3d(scene_id, cfg):
@@ -614,21 +359,10 @@ def process_hierarchical_agglomerative_growspp_stpls3d(scene_id, cfg):
             update_seed_stats = True
 
     exp_path = os.path.join(cfg.exp.save_dir, cfg.exp.exp_name)
-
-    spp_path = os.path.join(cfg.data.spp_path, f"{scene_id}.pt")
-
-    
     mask2d_path = os.path.join(exp_path, cfg.exp.mask2d_output, scene_id + ".pth")
-
-    # dc_feature_path = os.path.join(cfg.data.dc_features_path, scene_id + ".pth")
 
     scene_dir = os.path.join(cfg.data.datapath, scene_id)
     loader = build_dataset(root_path=scene_dir, cfg=cfg)
-
-    # 测试读取SPP（仅用于获取点数和超点数）
-    # spp_1 = loader.read_spp(spp_path)
-    # unique_spp, spp_1, num_point = torch.unique(spp_1, return_inverse=True, return_counts=True)
-    # n_spp_1 = len(unique_spp)
 
     img_dim = cfg.data.rgb_img_dim
     pointcloud_mapper = PointCloudToImageMapper(
@@ -637,6 +371,7 @@ def process_hierarchical_agglomerative_growspp_stpls3d(scene_id, cfg):
 
     points = loader.read_pointcloud()
     points = torch.from_numpy(points).cuda()
+    device = points.device
 
     # 导出目录（默认启用保存）：exp/<exp_name>/txt_exports/<scene_id>/
     exp_path = os.path.join(cfg.exp.save_dir, cfg.exp.exp_name)
@@ -650,54 +385,63 @@ def process_hierarchical_agglomerative_growspp_stpls3d(scene_id, cfg):
         pass
     n_points = points.shape[0]
 
-    # 加载SPP图结构与特征
-    spp_feature_dir = getattr(cfg.data, "dc_features_path", None)
-    spp_feature_level = 2
-    if hasattr(cfg, "graphcut"):
-        spp_feature_dir = getattr(cfg.graphcut, "spp_feature_dir", spp_feature_dir)
-        spp_feature_level = getattr(cfg.graphcut, "spp_feature_level", spp_feature_level)
-    if hasattr(cfg, "superpoint"):
-        spp_feature_dir = getattr(cfg.superpoint, "feature_dir", spp_feature_dir)
-        spp_feature_level = getattr(cfg.superpoint, "feature_level", spp_feature_level)
-    if spp_feature_dir is None:
-        raise ValueError("未找到SPP特征目录，请在配置中指定dc_features_path或superpoint.feature_dir")
-    pack_path = os.path.join(spp_feature_dir, f"{scene_id}_L{spp_feature_level}.pt")
-    pack = torch.load(pack_path, map_location="cpu")
+    def _resolve_scene_file(base_dirs, scene_id, exts):
+        for base_dir in base_dirs:
+            if base_dir is None:
+                continue
+            for ext in exts:
+                candidate = os.path.join(base_dir, f"{scene_id}{ext}")
+                if os.path.exists(candidate):
+                    return candidate
+        return None
 
-    spp = pack["level0_to_levelL"].to("cuda")
-    n_spp = int(pack["num_nodes"]) if "num_nodes" in pack else int(spp.max().item() + 1)
+    spp_dirs = []
+    # if hasattr(cfg, "superpoint"):
+    #     spp_dirs.append(getattr(cfg.superpoint, "save_dir", None))
+    spp_dirs.append(getattr(cfg.data, "spp_path", None))
+    spp_file = _resolve_scene_file(spp_dirs, scene_id, [".pth", ".pt"])
+    if spp_file is None:
+        raise FileNotFoundError(
+            f"未找到场景 {scene_id} 的SPP标签，请检查 superpoint.save_dir 或 data.spp_path。"
+        )
+    spp = loader.read_spp(spp_file, device=str(device)).long()
+    unique_spp, spp, _ = torch.unique(spp, return_inverse=True, return_counts=True)
+    n_spp = len(unique_spp)
 
-    def _to_cuda_tensor(data, dtype=None):
-        if data is None:
-            return None
-        if not isinstance(data, torch.Tensor):
-            data = torch.as_tensor(data)
-        if dtype is not None:
-            data = data.to(dtype)
-        return data.to("cuda")
+    point_feature_path = os.path.join(cfg.data.point_features_path, f"{scene_id}.pth")
+    if not os.path.exists(point_feature_path):
+        raise FileNotFoundError(
+            f"未找到场景 {scene_id} 的Utonia点特征: {point_feature_path}"
+        )
+    point_features = loader.read_feature(point_feature_path, device=str(device))
+    point_features = F.normalize(point_features.to(torch.float32), dim=1, p=2)
+    if point_features.shape[0] != n_points:
+        raise ValueError(
+            f"点特征数量与点云数量不一致: points={n_points}, features={point_features.shape[0]}"
+        )
 
-    edge_index_spp = _to_cuda_tensor(pack["edge_index"], dtype=torch.long)  # [2, E]
-    # edge features dict: ensure 1D
-    edge_features = {}
-    for k, v in pack["edge_features"].items():
-        tensor_v = torch.as_tensor(v)
-        if tensor_v.dim() > 1:
-            tensor_v = tensor_v.squeeze(-1)
-        edge_features[k] = _to_cuda_tensor(tensor_v, dtype=torch.float32)
+    spp_features, spp_centroids, spp_total_counts_global = aggregate_spp_features(
+        point_features,
+        spp,
+        points,
+        n_spp,
+    )
+    del point_features
+    spp_members = build_spp_members(spp, n_spp)
+    spp_neighbors = build_spp_adjacency_point_knn(
+        points,
+        spp,
+        n_spp,
+        k=int(getattr(cfg.cluster, "spp_graph_k", 8)),
+        max_neighbor_dist=getattr(cfg.cluster, "spp_graph_max_neighbor_dist", None),
+    )
+    total_edges = sum(len(neighbors) for neighbors in spp_neighbors) // 2
+    print(
+        f"[Utonia-SPP] scene={scene_id} n_spp={n_spp} "
+        f"graph_mode=point_knn edges={total_edges}"
+    )
 
-    node_features = {k: _to_cuda_tensor(torch.as_tensor(v), dtype=torch.float32) for k, v in pack["node_features"].items()}
-    centroid = _to_cuda_tensor(pack["centroid"], dtype=torch.float32)
-    rgb_mean = _to_cuda_tensor(pack.get("rgb_mean"), dtype=torch.float32)
-
-    # dc_feature = pack.get("point_features", None)
-    # if dc_feature is not None:
-    #     dc_feature = dc_feature.to("cuda")
-
-    # dc_feature_spp = pack.get("dc_feature_spp", None)
-    # if dc_feature_spp is not None:
-    #     dc_feature_spp = dc_feature_spp.to("cuda")
-
-    visibility = torch.zeros((n_points), dtype=torch.int, device='cuda')
+    visibility = torch.zeros((n_points,), dtype=torch.int32, device=device)
     groundedsam_data_dict = torch.load(mask2d_path)
 
     pcd_list = []
@@ -758,7 +502,7 @@ def process_hierarchical_agglomerative_growspp_stpls3d(scene_id, cfg):
         
         elif "stpls3d" in cfg.data.dataset_name:  # Map on image resolution in Scannetpp only
             rgb_dim_hw = cfg.data.img_dim # use actual image H,W for STPLS3D
-            mapping = torch.ones([n_points, 4], dtype=int, device='cuda')
+            mapping = torch.ones([n_points, 4], dtype=int, device=device)
             mapping[:, 1:4] = pointcloud_mapper.compute_mapping_torch(pose, points, rgb_dim_hw, depth=depth, intrinsic=instrinsic, id_1=scene_id, id_2=frame_id)
 
         else:
@@ -812,7 +556,7 @@ def process_hierarchical_agglomerative_growspp_stpls3d(scene_id, cfg):
     # 安全计算层级间隔（防止除零）
     valid_len = max(len(ious_level), 1)
     inter = int(maxlevel // valid_len)
-    point_acc = torch.zeros((n_points), dtype=int)
+    point_acc = torch.zeros((n_points,), dtype=torch.int32, device=device)
     spp_total_counts_global = torch.bincount(spp, minlength=n_spp).float()
     if cfg.agglomerative.hierarchical:
         groups = hierarchical_agglomerative_clustering_growspp_stpls3d(
@@ -828,20 +572,20 @@ def process_hierarchical_agglomerative_growspp_stpls3d(scene_id, cfg):
             points=points,
             spp=spp,
             n_spp=n_spp,
-            edge_index_spp=edge_index_spp,
-            edge_features=edge_features,
-            node_features=node_features,
-            centroid=centroid,
-            rgb_mean=rgb_mean,
+            spp_neighbors=spp_neighbors,
+            spp_members=spp_members,
+            spp_features=spp_features,
+            spp_centroids=spp_centroids,
             save_intermediate_dir=export_intermediate,
             spp_total_counts_global=spp_total_counts_global,
+            cluster_cfg=cfg.cluster,
             update_seed_stats=update_seed_stats,
         )
     ###
     if len(groups) == 0:
         return None, None
 
-    groups = groups.to(torch.int64).cpu()
+    groups = groups.to(torch.int64)
     confidence = torch.ones(groups.shape[0], dtype=torch.float32, device=groups.device)
 
     proposals_pred = groups[:, :]  # .bool()
@@ -861,17 +605,18 @@ def process_hierarchical_agglomerative_growspp_stpls3d(scene_id, cfg):
     post_filter = 0.2
     # These lines take a lot of memory # achieveing in paper result-> unlock this
     if cfg.cluster.point_visi > 0:
-        point_acc = point_acc.cuda()
-        visibility -= point_acc
+        visibility = visibility - point_acc
+        visibility_safe = visibility.clamp(min=1).to(torch.float32)
+        bs = 512
         start = 0
         end = proposals_pred.shape[0]
-        inst_visibility = torch.zeros_like(proposals_pred, dtype=torch.float64).cpu()
-        bs = 1000
-        while(start<end):
-            inst_visibility[start:start+bs] = (proposals_pred[start:start+bs] / visibility.clip(min=1e-6)[None, :].cpu().to(torch.float64))
-            start += bs
-        torch.cuda.empty_cache()    
-        proposals_pred[inst_visibility < post_filter] = 0
+        while start < end:
+            batch_end = min(start + bs, end)
+            batch_visibility = proposals_pred[start:batch_end].to(torch.float32) / visibility_safe.unsqueeze(0)
+            batch_keep = batch_visibility >= post_filter
+            proposals_pred[start:batch_end] = proposals_pred[start:batch_end] * batch_keep.to(proposals_pred.dtype)
+            start = batch_end
+        torch.cuda.empty_cache()
     else:
         pass    
     proposals_pred = proposals_pred.bool()
@@ -884,11 +629,14 @@ def process_hierarchical_agglomerative_growspp_stpls3d(scene_id, cfg):
             pool=True,
             output_type=torch.float64,
         )
-        proposals_pred = (proposals_pred_final >= 0.5)[:, spp]
+        # custom_scatter_mean() 当前按 batch 在 GPU 上聚合、再回收到 CPU 以避免 OOM，
+        # 所以后续这里也保持在 CPU 上完成索引，避免 CPU/GPU 混用报错。
+        proposals_pred = (proposals_pred_final >= 0.5)[:, spp.cpu()]
 
     ## Valid points
     mask_valid = proposals_pred.sum(1) > cfg.cluster.valid_points
     proposals_pred = proposals_pred[mask_valid].cpu()
+    confidence = confidence.cpu()[mask_valid.cpu()]
 
 
     # 最终结果保存：

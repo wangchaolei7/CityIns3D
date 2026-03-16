@@ -21,7 +21,22 @@ def _standardize(x: np.ndarray) -> np.ndarray:
     return (x - mean) / std
 
 
-def _neighbor_offsets(connectivity: int) -> Iterable[Tuple[int, int, int]]:
+def _compact_labels(labels: np.ndarray) -> np.ndarray:
+    if labels.size == 0:
+        return labels.astype(np.int64, copy=False)
+    unique = np.unique(labels)
+    remapped = np.searchsorted(unique, labels)
+    return remapped.astype(np.int64, copy=False)
+
+
+def _torch_load_local(path: str, map_location: str = "cpu"):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
+def _neighbor_offsets(connectivity: int) -> Tuple[Tuple[int, int, int], ...]:
     if connectivity == 6:
         return (
             (1, 0, 0),
@@ -39,19 +54,76 @@ def _neighbor_offsets(connectivity: int) -> Iterable[Tuple[int, int, int]]:
             for dz in (-1, 0, 1)
             if not (dx == 0 and dy == 0 and dz == 0)
         )
-    raise ValueError(f"Unsupported connected-component connectivity: {connectivity}")
+    raise ValueError(f"Unsupported connectivity: {connectivity}")
+
+
+class _UnionFind:
+    def __init__(self, n: int):
+        self.parent = np.arange(n, dtype=np.int64)
+        self.rank = np.zeros((n,), dtype=np.int8)
+
+    def find(self, x: int) -> int:
+        parent = self.parent
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(self, a: int, b: int):
+        root_a = self.find(a)
+        root_b = self.find(b)
+        if root_a == root_b:
+            return
+        if self.rank[root_a] < self.rank[root_b]:
+            root_a, root_b = root_b, root_a
+        self.parent[root_b] = root_a
+        if self.rank[root_a] == self.rank[root_b]:
+            self.rank[root_a] += 1
+
+    def labels(self) -> np.ndarray:
+        labels = np.empty_like(self.parent)
+        for idx in range(self.parent.shape[0]):
+            labels[idx] = self.find(idx)
+        return _compact_labels(labels)
 
 
 class UtoniaSuperpointGenerator:
     def __init__(self, cfg):
         if not hasattr(cfg, "superpoint"):
-            raise ValueError("superpoint config is required for Utonia voxel prototype superpoints.")
+            raise ValueError("superpoint config is required for Utonia superpoint generation.")
 
         self.cfg = cfg
         self.point_feature_dir = cfg.data.point_features_path
         self.original_ply_root = cfg.data.original_ply
         self.save_dir = getattr(cfg.superpoint, "save_dir", cfg.data.spp_path)
-        self.proto_grid_size = float(getattr(cfg.superpoint, "proto_grid_size", 0.5))
+        self.method = getattr(cfg.superpoint, "method", "utonia_voxel_graph_overseg")
+        self.proto_grid_size = float(getattr(cfg.superpoint, "proto_grid_size", 0.2))
+
+        # New default: local voxel-graph over-segmentation.
+        self.graph_connectivity = int(getattr(cfg.superpoint, "graph_connectivity", 6))
+        self.graph_feature_threshold = float(
+            getattr(cfg.superpoint, "graph_feature_threshold", 0.78)
+        )
+        self.graph_merge_small_components = bool(
+            getattr(cfg.superpoint, "graph_merge_small_components", True)
+        )
+        self.graph_min_component_voxels = int(
+            getattr(cfg.superpoint, "graph_min_component_voxels", 3)
+        )
+        self.graph_min_component_points = int(
+            getattr(cfg.superpoint, "graph_min_component_points", 64)
+        )
+        self.graph_merge_sim_threshold = float(
+            getattr(cfg.superpoint, "graph_merge_sim_threshold", 0.72)
+        )
+        self.graph_edge_chunk_size = int(
+            getattr(cfg.superpoint, "graph_edge_chunk_size", 262144)
+        )
+        self.component_connectivity = int(
+            getattr(cfg.superpoint, "component_connectivity", self.graph_connectivity)
+        )
+
+        # Legacy global clustering path, kept optional.
         self.cluster_method = getattr(cfg.superpoint, "cluster_method", "hdbscan")
         self.hdbscan_min_cluster_size = int(
             getattr(cfg.superpoint, "hdbscan_min_cluster_size", 20)
@@ -65,15 +137,13 @@ class UtoniaSuperpointGenerator:
         self.feature_weight = float(getattr(cfg.superpoint, "feature_weight", 1.0))
         self.coord_weight = float(getattr(cfg.superpoint, "coord_weight", 0.35))
         self.pca_dim = int(getattr(cfg.superpoint, "pca_dim", 16))
-        self.component_connectivity = int(
-            getattr(cfg.superpoint, "component_connectivity", 6)
-        )
         self.assignment_chunk_size = int(
             getattr(cfg.superpoint, "assignment_chunk_size", 32768)
         )
         self.fallback_num_prototypes = int(
             getattr(cfg.superpoint, "fallback_num_prototypes", 256)
         )
+
         requested_device = getattr(
             cfg.superpoint,
             "assignment_device",
@@ -90,17 +160,16 @@ class UtoniaSuperpointGenerator:
             )
 
         voxel_pack = self._build_voxel_prototypes(coord, point_feat)
-        voxel_embedding = self._build_cluster_embedding(
-            voxel_pack["coord"],
-            voxel_pack["feat"],
-        )
 
-        voxel_labels, cluster_mode = self._cluster_voxels(voxel_embedding)
-        voxel_labels, noise_count = self._assign_noise_voxels(voxel_embedding, voxel_labels)
-        voxel_labels = self._split_connected_components(
-            voxel_pack["grid_coord"],
-            voxel_labels,
-        )
+        if self.method == "utonia_voxel_graph_overseg":
+            voxel_labels, method_stats = self._graph_oversegment(voxel_pack)
+            cluster_mode = "graph_overseg"
+            noise_count = 0
+        elif self.method == "utonia_voxel_prototype":
+            voxel_labels, cluster_mode, noise_count, method_stats = self._global_cluster(voxel_pack)
+        else:
+            raise ValueError(f"Unsupported superpoint method: {self.method}")
+
         point_labels = voxel_labels[voxel_pack["point_to_voxel"]]
 
         stats = {
@@ -108,11 +177,12 @@ class UtoniaSuperpointGenerator:
             "num_points": int(point_feat.shape[0]),
             "num_voxels": int(voxel_pack["coord"].shape[0]),
             "num_clusters": int(np.unique(voxel_labels).shape[0]),
-            "num_superpoints": int(voxel_labels.max()) + 1 if voxel_labels.size > 0 else 0,
+            "num_superpoints": int(np.unique(voxel_labels).shape[0]),
             "num_noise_points": int(noise_count),
             "cluster_mode": cluster_mode,
             "used_saved_spp_feat": bool(feature_meta["used_saved_spp_feat"]),
         }
+        stats.update(method_stats)
         return point_labels, stats
 
     def save_scene(self, scene_id: str, point_labels: np.ndarray):
@@ -150,7 +220,7 @@ class UtoniaSuperpointGenerator:
                 "Run scripts/generate_spp_feat.sh first."
             )
 
-        data = torch.load(feature_path, map_location="cpu")
+        data = _torch_load_local(feature_path, map_location="cpu")
         if isinstance(data, dict):
             point_feat = data.get("spp_feat", data.get("feat"))
             used_saved_spp_feat = "spp_feat" in data
@@ -191,6 +261,184 @@ class UtoniaSuperpointGenerator:
             "coord": voxel_coord,
             "feat": voxel_feat,
             "counts": counts,
+        }
+
+    def _graph_oversegment(self, voxel_pack) -> Tuple[np.ndarray, Dict[str, int]]:
+        num_voxels = voxel_pack["coord"].shape[0]
+        if num_voxels == 0:
+            return np.zeros((0,), dtype=np.int64), {
+                "num_graph_edges": 0,
+                "num_kept_edges": 0,
+                "num_small_merged": 0,
+            }
+        if num_voxels == 1:
+            return np.zeros((1,), dtype=np.int64), {
+                "num_graph_edges": 0,
+                "num_kept_edges": 0,
+                "num_small_merged": 0,
+            }
+
+        edges = self._build_local_graph_edges(
+            voxel_pack["grid_coord"],
+            connectivity=self.graph_connectivity,
+        )
+        if edges.shape[0] == 0:
+            labels = np.arange(num_voxels, dtype=np.int64)
+            return labels, {
+                "num_graph_edges": 0,
+                "num_kept_edges": 0,
+                "num_small_merged": 0,
+            }
+
+        edge_sim = self._compute_edge_similarity(voxel_pack["feat"], edges)
+        keep_mask = edge_sim >= self.graph_feature_threshold
+        labels = self._connected_components_from_edges(num_voxels, edges[keep_mask])
+
+        merged_small = 0
+        if self.graph_merge_small_components:
+            labels, merged_small = self._merge_small_components(
+                labels,
+                voxel_pack["counts"],
+                edges,
+                edge_sim,
+            )
+
+        labels = self._split_connected_components(
+            voxel_pack["grid_coord"],
+            labels,
+            connectivity=self.component_connectivity,
+        )
+        labels = _compact_labels(labels)
+
+        return labels, {
+            "num_graph_edges": int(edges.shape[0]),
+            "num_kept_edges": int(keep_mask.sum()),
+            "num_small_merged": int(merged_small),
+        }
+
+    def _build_local_graph_edges(
+        self,
+        grid_coord: np.ndarray,
+        *,
+        connectivity: int,
+    ) -> np.ndarray:
+        offsets = _neighbor_offsets(connectivity)
+        index_map = {tuple(coord.tolist()): idx for idx, coord in enumerate(grid_coord)}
+        edges = []
+
+        for idx, coord in enumerate(grid_coord):
+            x, y, z = coord.tolist()
+            for dx, dy, dz in offsets:
+                nbr_idx = index_map.get((x + dx, y + dy, z + dz))
+                if nbr_idx is None or nbr_idx <= idx:
+                    continue
+                edges.append((idx, nbr_idx))
+
+        if not edges:
+            return np.zeros((0, 2), dtype=np.int64)
+        return np.asarray(edges, dtype=np.int64)
+
+    def _compute_edge_similarity(self, voxel_feat: np.ndarray, edges: np.ndarray) -> np.ndarray:
+        feat = voxel_feat.astype(np.float32, copy=False)
+        feat = _row_normalize(feat)
+
+        sims = np.empty((edges.shape[0],), dtype=np.float32)
+        for start_idx in range(0, edges.shape[0], self.graph_edge_chunk_size):
+            end_idx = min(edges.shape[0], start_idx + self.graph_edge_chunk_size)
+            edge_chunk = edges[start_idx:end_idx]
+            lhs = torch.from_numpy(feat[edge_chunk[:, 0]]).to(
+                self.assignment_device,
+                dtype=torch.float32,
+            )
+            rhs = torch.from_numpy(feat[edge_chunk[:, 1]]).to(
+                self.assignment_device,
+                dtype=torch.float32,
+            )
+            sims[start_idx:end_idx] = (lhs * rhs).sum(dim=1).cpu().numpy()
+        return sims
+
+    def _connected_components_from_edges(self, num_nodes: int, edges: np.ndarray) -> np.ndarray:
+        if edges.shape[0] == 0:
+            return np.arange(num_nodes, dtype=np.int64)
+
+        uf = _UnionFind(num_nodes)
+        for u, v in edges:
+            uf.union(int(u), int(v))
+        return uf.labels()
+
+    def _merge_small_components(
+        self,
+        labels: np.ndarray,
+        voxel_counts: np.ndarray,
+        edges: np.ndarray,
+        edge_sim: np.ndarray,
+    ) -> Tuple[np.ndarray, int]:
+        labels = labels.astype(np.int64, copy=True)
+        merged = 0
+
+        while True:
+            unique, inverse = np.unique(labels, return_inverse=True)
+            comp_voxel_counts = np.bincount(inverse)
+            comp_point_counts = np.bincount(
+                inverse,
+                weights=voxel_counts.astype(np.float64, copy=False),
+            )
+            small_components = unique[
+                (comp_voxel_counts < self.graph_min_component_voxels)
+                | (comp_point_counts < self.graph_min_component_points)
+            ]
+            if small_components.size == 0:
+                break
+
+            changed = False
+            for comp in small_components.tolist():
+                label_u = labels[edges[:, 0]]
+                label_v = labels[edges[:, 1]]
+                edge_mask = ((label_u == comp) & (label_v != comp)) | ((label_v == comp) & (label_u != comp))
+                if not np.any(edge_mask):
+                    continue
+
+                nbr_labels = np.where(label_u[edge_mask] == comp, label_v[edge_mask], label_u[edge_mask])
+                nbr_sims = edge_sim[edge_mask]
+                if nbr_labels.size == 0:
+                    continue
+
+                uniq_nbr, inv_nbr = np.unique(nbr_labels, return_inverse=True)
+                best_scores = np.full((uniq_nbr.shape[0],), -np.inf, dtype=np.float32)
+                np.maximum.at(best_scores, inv_nbr, nbr_sims)
+                best_idx = int(np.argmax(best_scores))
+                if best_scores[best_idx] < self.graph_merge_sim_threshold:
+                    continue
+
+                labels[labels == comp] = uniq_nbr[best_idx]
+                merged += 1
+                changed = True
+
+            if not changed:
+                break
+
+            labels = _compact_labels(labels)
+
+        return labels, merged
+
+    def _global_cluster(self, voxel_pack):
+        voxel_embedding = self._build_cluster_embedding(
+            voxel_pack["coord"],
+            voxel_pack["feat"],
+        )
+
+        voxel_labels, cluster_mode = self._cluster_voxels(voxel_embedding)
+        voxel_labels, noise_count = self._assign_noise_voxels(voxel_embedding, voxel_labels)
+        voxel_labels = self._split_connected_components(
+            voxel_pack["grid_coord"],
+            voxel_labels,
+            connectivity=self.component_connectivity,
+        )
+        voxel_labels = _compact_labels(voxel_labels)
+        return voxel_labels, cluster_mode, noise_count, {
+            "num_graph_edges": 0,
+            "num_kept_edges": 0,
+            "num_small_merged": 0,
         }
 
     def _build_cluster_embedding(self, voxel_coord: np.ndarray, voxel_feat: np.ndarray) -> np.ndarray:
@@ -333,7 +581,13 @@ class UtoniaSuperpointGenerator:
             assigned[start_idx:end_idx] = dist.argmin(dim=1).cpu().numpy()
         return assigned
 
-    def _split_connected_components(self, grid_coord: np.ndarray, labels: np.ndarray) -> np.ndarray:
+    def _split_connected_components(
+        self,
+        grid_coord: np.ndarray,
+        labels: np.ndarray,
+        *,
+        connectivity: int,
+    ) -> np.ndarray:
         if grid_coord.shape[0] != labels.shape[0]:
             raise ValueError(
                 f"grid_coord/labels size mismatch: {grid_coord.shape[0]} != {labels.shape[0]}"
@@ -342,7 +596,7 @@ class UtoniaSuperpointGenerator:
             return np.zeros((0,), dtype=np.int64)
 
         index_map = {tuple(coord.tolist()): idx for idx, coord in enumerate(grid_coord)}
-        offsets = _neighbor_offsets(self.component_connectivity)
+        offsets = _neighbor_offsets(connectivity)
         final_labels = -np.ones_like(labels, dtype=np.int64)
         next_label = 0
 

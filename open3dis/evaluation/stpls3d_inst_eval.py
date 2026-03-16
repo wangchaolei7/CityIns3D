@@ -3,15 +3,7 @@ import os
 from copy import deepcopy
 
 import numpy as np
-from open3dis.dataset.scannet200 import (
-    BASE_CLASSES_SCANNET200,
-    COMMON_CATS_SCANNET_200,
-    HEAD_CATS_SCANNET_200,
-    INSTANCE_CAT_SCANNET_200,
-    NOVEL_CLASSES_SCANNET200,
-    TAIL_CATS_SCANNET_200,
-    VALID_CLASS_IDS_200_VALIDATION,
-)
+
 from open3dis.evaluation.instance_eval_util import get_instances
 
 from tqdm import tqdm, trange

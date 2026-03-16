@@ -20,7 +20,7 @@ class BaseMaskStpls3d:
         self.clip_preprocess = clip2d.clip_preprocess
         self.score_name = "score"
 
-    def gen_grounded_mask_and_feat(self, scene_id, class_names, cfg, gen_feat=True):
+    def gen_grounded_mask_and_feat(self, scene_id, class_names, cfg, gen_feat=False):
         """
         Generate 2D masks, keep the downstream save/feature flow unchanged,
         and only swap the mask backend.
@@ -71,11 +71,19 @@ class BaseMaskStpls3d:
                 image_rgb=image_rgb,
                 cfg=cfg,
             )
-            if not mask_dicts:
-                continue
 
             masks, confs_filt, boxes_filt = self._mask_dicts_to_tensors(mask_dicts)
             if masks is None:
+                self._save_visualizations(
+                    scene_id=scene_id,
+                    frame_id=frame_id,
+                    image_pil=image_pil,
+                    image_rgb=image_rgb,
+                    masks=None,
+                    boxes_filt=None,
+                    confs_filt=None,
+                    cfg=cfg,
+                )
                 continue
 
             image_features = self._extract_clip_features(
@@ -345,34 +353,36 @@ class BaseMaskStpls3d:
         os.makedirs(sammask_dir, exist_ok=True)
 
         image_np = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
-        for box, conf in zip(boxes_filt, confs_filt):
-            left, top, right, bottom = map(int, box.cpu().numpy())
-            cv2.rectangle(image_np, (left, top), (right, bottom), (0, 255, 0), 2)
-            text = f"{self.score_name}: {float(conf):.2f}"
-            cv2.putText(
-                image_np,
-                text,
-                (left, bottom + 15),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 255, 0),
-                1,
-            )
+        if boxes_filt is not None and confs_filt is not None:
+            for box, conf in zip(boxes_filt, confs_filt):
+                left, top, right, bottom = map(int, box.cpu().numpy())
+                cv2.rectangle(image_np, (left, top), (right, bottom), (0, 255, 0), 2)
+                text = f"{self.score_name}: {float(conf):.2f}"
+                cv2.putText(
+                    image_np,
+                    text,
+                    (left, bottom + 15),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    1,
+                )
         cv2.imwrite(os.path.join(sambox_dir, f"{frame_id}.png"), image_np)
 
-        mask_vis = np.zeros_like(image_rgb)
-        for mask in masks.cpu().numpy():
-            mask_vis[mask[0]] = np.random.randint(0, 255, 3).tolist()
-
         combined = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
-        mask_areas = np.any(mask_vis > 0, axis=2)
-        combined[mask_areas] = cv2.addWeighted(
-            combined[mask_areas],
-            0.6,
-            mask_vis[mask_areas],
-            0.7,
-            0,
-        )
+        if masks is not None:
+            mask_vis = np.zeros_like(image_rgb)
+            for mask in masks.cpu().numpy():
+                mask_vis[mask[0]] = np.random.randint(0, 255, 3).tolist()
+
+            mask_areas = np.any(mask_vis > 0, axis=2)
+            combined[mask_areas] = cv2.addWeighted(
+                combined[mask_areas],
+                0.6,
+                mask_vis[mask_areas],
+                0.7,
+                0,
+            )
         cv2.imwrite(os.path.join(sammask_dir, f"{frame_id}.png"), combined)
 
     def _to_bool_mask(self, segmentation):
