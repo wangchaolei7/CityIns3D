@@ -103,7 +103,7 @@ superpoint:
   tgc_graph_connectivity: 6
   tgc_reg: 1.0
   tgc_native_reg: 5.0
-  tgc_utonia_reg: 40.0
+  tgc_utonia_reg: 80.0
   tgc_min_size: 64
   tgc_native_min_size: 256
   tgc_utonia_min_size: 256
@@ -147,12 +147,23 @@ cluster:
   spp_graph_k: 8
   spp_graph_max_neighbor_dist:
   feature_pool_chunk_size: 64
+  part_support_metric: 'cosine'
+  part_affinity_alpha: 0.7
+  part_affinity_thresholds: [0.75, 0.65, 0.55, 0.45]
+  part_min_points: 50
+  part_min_spp: 1
+  part_min_support: 0.02
+  part_min_confidence: 0.0
+  part_reassign_use_feature_tiebreak: True
+  part_reassign_tie_margin: 0.005
+  part_final_component_min_spp: 1
+  part_final_component_min_points: 80
 
 refine_grounding:
   top_k: 5 #⭐从5修改到2
 
 final_instance:
-  spp_level: sppgrow_stpls3d # spp usage ? ⭐ 修改为spp、grow、sppgrow
+  spp_level: sppgrow_stpls3d 
   duplicate: True
   iou_overlap: 0.9
   top_k: 300
@@ -165,6 +176,7 @@ exp:
   grounded_feat_output: 'grounded_feat' # first stage feature
   refined_grounded_feat_output: 'refined_grounded_feat' # second stage feature
   clustering_3d_output: '3d_ins_img16' # 2Dlift path
+  clustering_3d_output_lifted_part: '3d_ins_img16_lifted_part'
   final_output: 'final_result_hier_agglo' 
   save_dir: '/data1/wangcl/project/CityIns3D/stpls3d/'
 

@@ -284,7 +284,8 @@ def resolve_gt_path(cfg, scene_id, explicit_path=None):
 def resolve_cluster_output_path(cfg, scene_id, explicit_path=None):
     if explicit_path is not None:
         return explicit_path
-    output_root = os.path.join(cfg.exp.save_dir, cfg.exp.exp_name, cfg.exp.clustering_3d_output)
+    # output_root = os.path.join(cfg.exp.save_dir, cfg.exp.exp_name, cfg.exp.clustering_3d_output)
+    output_root = os.path.join(cfg.exp.save_dir, cfg.exp.exp_name, cfg.exp.clustering_3d_output_lifted_part)
     return os.path.join(output_root, f"{scene_id}.pth")
 
 
