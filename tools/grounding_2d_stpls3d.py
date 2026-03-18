@@ -25,6 +25,9 @@ We generate class-agnostic 2D masks based on {DATASET} class name and CLIP featu
 def get_parser():
     parser = argparse.ArgumentParser(description="Configuration Open3DIS")
     parser.add_argument("--config",type=str,required = True,help="Config")
+    parser.add_argument("--scene-list", type=str, default=None, help="Override scene list path")
+    parser.add_argument("--worker-id", type=int, default=0, help="Worker shard index")
+    parser.add_argument("--num-workers", type=int, default=1, help="Total worker shards")
     return parser
 
 if __name__ == "__main__":
@@ -33,9 +36,19 @@ if __name__ == "__main__":
 
     cfg = Munch.fromDict(yaml.safe_load(open(args.config, "r").read()))
 
-    # Scannet split path
-    with open(cfg.data.split_path, "r") as file:
+    scene_list_path = args.scene_list or cfg.data.split_path
+    with open(scene_list_path, "r") as file:
         scene_ids = sorted([line.rstrip("\n") for line in file])
+    if args.num_workers > 1:
+        if args.worker_id < 0 or args.worker_id >= args.num_workers:
+            raise ValueError(
+                f"worker-id must be in [0, {args.num_workers}), got {args.worker_id}"
+            )
+        scene_ids = scene_ids[args.worker_id::args.num_workers]
+    print(
+        f"[grounding_2d] scene_list={scene_list_path} "
+        f"worker={args.worker_id}/{args.num_workers} num_scenes={len(scene_ids)}"
+    )
 
     if cfg.data.dataset_name == 'scannet200':
         class_names = INSTANCE_CAT_SCANNET_200
@@ -60,8 +73,20 @@ if __name__ == "__main__":
 
     # Directory Init
     save_dir = os.path.join(cfg.exp.save_dir, cfg.exp.exp_name, cfg.exp.mask2d_output)
+    save_dir_stage1 = os.path.join(
+        cfg.exp.save_dir,
+        cfg.exp.exp_name,
+        getattr(cfg.exp, "mask2d_output_stage1", f"{cfg.exp.mask2d_output}_stage1"),
+    )
+    save_dir_stage2 = os.path.join(
+        cfg.exp.save_dir,
+        cfg.exp.exp_name,
+        getattr(cfg.exp, "mask2d_output_stage2", f"{cfg.exp.mask2d_output}_stage2"),
+    )
     save_dir_feat = os.path.join(cfg.exp.save_dir, cfg.exp.exp_name, cfg.exp.grounded_feat_output)
     os.makedirs(save_dir, exist_ok=True)
+    os.makedirs(save_dir_stage1, exist_ok=True)
+    os.makedirs(save_dir_stage2, exist_ok=True)
     os.makedirs(save_dir_feat, exist_ok=True)
 
     # Proces every scene
@@ -85,7 +110,7 @@ if __name__ == "__main__":
                 file.write(path + "\n")
             #####################################
             print("Process", scene_id)
-            grounded_data_dict, grounded_features = model.gen_grounded_mask_and_feat(
+            stage_outputs, grounded_features = model.gen_grounded_mask_and_feat(
                 scene_id,
                 class_names,
                 cfg=cfg,
@@ -95,7 +120,9 @@ if __name__ == "__main__":
 
             # Save PC features
             torch.save({"feat": grounded_features}, os.path.join(save_dir_feat, scene_id + ".pth"))
-            # Save 2D mask
-            torch.save(grounded_data_dict, os.path.join(save_dir, scene_id + ".pth"))
+            # Save 2D masks for stage1 / stage2 / final merged
+            torch.save(stage_outputs["stage1"], os.path.join(save_dir_stage1, scene_id + ".pth"))
+            torch.save(stage_outputs["stage2"], os.path.join(save_dir_stage2, scene_id + ".pth"))
+            torch.save(stage_outputs["final"], os.path.join(save_dir, scene_id + ".pth"))
             # Free memory
             torch.cuda.empty_cache()

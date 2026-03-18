@@ -19,6 +19,22 @@ foundation_model:
   sam3_inference_mode: 'batched' # 或 'sequential'
   sam3_log_timing: False
   sam3_compile: False
+  sam3_stage2_enable: True
+  sam3_stage2_spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_utonia_reg200'
+  sam3_stage2_visible_ratio_thresh: 0.3
+  sam3_stage2_min_uncovered_pixels: 100
+  sam3_stage2_overlap_with_stage1_thresh: 0.5
+  sam3_stage2_nms_iou_thresh: 0.5
+  sam3_stage2_confidence_threshold: 0.3
+  sam3_stage2_uncovered_purity_thresh: 0.3
+  sam3_stage2_max_prompts_per_frame: 32
+  sam3_stage2_region_dilate: 5
+  sam3_stage2_region_close: 5
+  mask_valid_crop_pad: 10
+  mask_valid_close: 11
+  mask_valid_dilate: 5
+  mask_valid_overlap_thresh: 0.3
+  mask_clip_to_valid: True
   # SAM2
   sam2_model_config: "configs/sam2.1/sam2.1_hiera_l.yaml" 
   sam2_checkpoint: "/home/Data/data3/wcl/offline_wheel/sam2.1_hiera_large.pt"
@@ -64,6 +80,7 @@ data:
   gt_pth: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/groundtruth' # gt path
   original_ply: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/original_ply_files' # raw pcl
   spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_utonia' 
+  # spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_utonia_reg200'
   # spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_native' 
   point_features_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/utonia_point_features' # point-level feature path
   cls_agnostic_3d_proposals_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/isbnet_clsagnostic_scannet200' # cls agnostic 3D proposals
@@ -96,14 +113,14 @@ superpoint:
   fallback_num_prototypes: 256
   component_connectivity: 6
   tgc_native_output_dir: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_native'
-  tgc_utonia_output_dir: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_utonia'
+  tgc_utonia_output_dir: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_utonia_reg200'
   tgc_voxel_size: 0.1
   tgc_native_voxel_size: 0.25
   tgc_utonia_voxel_size: 0.25
   tgc_graph_connectivity: 6
   tgc_reg: 1.0
   tgc_native_reg: 5.0
-  tgc_utonia_reg: 40.0
+  tgc_utonia_reg: 200.0
   tgc_min_size: 64
   tgc_native_min_size: 256
   tgc_utonia_min_size: 256
@@ -172,7 +189,9 @@ final_instance:
 exp:
   exp_name: "version_SAM3"  # for ablation study
   # exp_name: "version_YoloW-SAM"  # for ablation study
-  mask2d_output: 'mask' # 2D mask + pc features
+  mask2d_output: 'mask_sam3_stage12' # final merged 2D masks
+  mask2d_output_stage1: 'mask_sam3_stage1'
+  mask2d_output_stage2: 'mask_sam3_stage2'
   grounded_feat_output: 'grounded_feat' # first stage feature
   refined_grounded_feat_output: 'refined_grounded_feat' # second stage feature
   clustering_3d_output: '3d_ins_img16' # 2Dlift path

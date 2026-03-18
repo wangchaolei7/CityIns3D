@@ -54,6 +54,7 @@ class Sam3_Stpls3d(BaseMaskStpls3d):
             checkpoint_path=sam3_checkpoint,
             load_from_HF=False,
             device=sam3_device,
+            enable_inst_interactivity=True,
             compile=sam3_compile,
         )
         self.processor = Sam3Processor(
@@ -127,6 +128,87 @@ class Sam3_Stpls3d(BaseMaskStpls3d):
             elapsed = time.perf_counter() - start_time
             print(
                 f"[SAM3][{self.inference_mode}] prompts={len(class_names)} "
+                f"masks={len(mask_dicts)} elapsed={elapsed:.3f}s"
+            )
+        return mask_dicts
+
+    def generate_point_prompt_masks(self, image_pil, point_prompts, cfg):
+        if not point_prompts:
+            return []
+        if not hasattr(self.model, "predict_inst") or getattr(self.model, "inst_interactive_predictor", None) is None:
+            raise RuntimeError("Current SAM3 model build does not expose interactive point-prompt prediction.")
+
+        start_time = time.perf_counter()
+        self._sync_device()
+
+        state = self.processor.set_image(image_pil)
+        score_threshold = float(
+            getattr(
+                cfg.foundation_model,
+                "sam3_stage2_confidence_threshold",
+                getattr(cfg.foundation_model, "sam3_confidence_threshold", 0.5),
+            )
+        )
+
+        mask_dicts = []
+        width, height = image_pil.size
+        for prompt_index, point in enumerate(point_prompts):
+            x, y = int(point[0]), int(point[1])
+            if x < 0 or x >= width or y < 0 or y >= height:
+                continue
+
+            masks, scores, _ = self.model.predict_inst(
+                state,
+                point_coords=np.asarray([[x, y]], dtype=np.float32),
+                point_labels=np.asarray([1], dtype=np.int32),
+                multimask_output=True,
+                return_logits=False,
+                normalize_coords=True,
+            )
+            if masks is None or scores is None or len(scores) == 0:
+                continue
+
+            containing_ids = np.where(masks[:, y, x] > 0)[0]
+            if containing_ids.size > 0:
+                best_local = int(containing_ids[np.argmax(scores[containing_ids])])
+            else:
+                best_local = int(np.argmax(scores))
+
+            score = float(scores[best_local])
+            if score < score_threshold:
+                continue
+
+            segmentation = masks[best_local].astype(np.bool_)
+            if not np.any(segmentation):
+                continue
+            segmentation = self._keep_prompt_component(segmentation, [x, y])
+            if not np.any(segmentation):
+                continue
+
+            ys, xs = np.where(segmentation)
+            bbox = [
+                int(xs.min()),
+                int(ys.min()),
+                int(xs.max() - xs.min() + 1),
+                int(ys.max() - ys.min() + 1),
+            ]
+            mask_dicts.append(
+                {
+                    "segmentation": segmentation,
+                    "bbox": bbox,
+                    "area": int(segmentation.sum()),
+                    "predicted_iou": score,
+                    "point_coords": [[x, y]],
+                    "prompt_index": int(prompt_index),
+                    "prompt_type": "point",
+                }
+            )
+
+        self._sync_device()
+        if self.log_timing:
+            elapsed = time.perf_counter() - start_time
+            print(
+                f"[SAM3][point] prompts={len(point_prompts)} "
                 f"masks={len(mask_dicts)} elapsed={elapsed:.3f}s"
             )
         return mask_dicts

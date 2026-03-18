@@ -1,44 +1,91 @@
-#!/bin/sh
+#!/bin/bash
 
-PID0=""
-PID1=""
-TASK_PID=""
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+GPU_IDS="${GPU_IDS:-3,4}"
+CONFIG_PATH="${CONFIG_PATH:-configs/stpls3d.yaml}"
+SCENE_LIST="${SCENE_LIST:-./open3dis/dataset_outdoor/stpls3d_val_ori.txt}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+declare -a EXTRA_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --config)
+      CONFIG_PATH="$2"
+      shift 2
+      ;;
+    --scene-list)
+      SCENE_LIST="$2"
+      shift 2
+      ;;
+    --gpu-ids)
+      GPU_IDS="$2"
+      shift 2
+      ;;
+    *)
+      EXTRA_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+IFS=',' read -r -a GPU_ARRAY <<< "$GPU_IDS"
+NUM_WORKERS="${#GPU_ARRAY[@]}"
+if [[ "$NUM_WORKERS" -le 0 ]]; then
+  echo "No GPU ids provided."
+  exit 1
+fi
+
 USE_SETSID=0
-
 if command -v setsid >/dev/null 2>&1; then
   USE_SETSID=1
 fi
 
-start_task() {
-  gpu_id="$1"
-  config_path="$2"
+declare -a PIDS=()
 
-  if [ "$USE_SETSID" -eq 1 ]; then
+start_task() {
+  local worker_id="$1"
+  local gpu_id="$2"
+
+  if [[ "$USE_SETSID" -eq 1 ]]; then
     setsid env \
       CUDA_VISIBLE_DEVICES="$gpu_id" \
       PYTHONWARNINGS="ignore" \
-      PYTHONPATH="./:$PYTHONPATH" \
-      python3 tools/grounding_2d_stpls3d.py --config "$config_path" &
+      PYTHONPATH="./:${PYTHONPATH:-}" \
+      "$PYTHON_BIN" tools/grounding_2d_stpls3d.py \
+      --config "$CONFIG_PATH" \
+      --scene-list "$SCENE_LIST" \
+      --worker-id "$worker_id" \
+      --num-workers "$NUM_WORKERS" \
+      "${EXTRA_ARGS[@]}" &
   else
     env \
       CUDA_VISIBLE_DEVICES="$gpu_id" \
       PYTHONWARNINGS="ignore" \
-      PYTHONPATH="./:$PYTHONPATH" \
-      python3 tools/grounding_2d_stpls3d.py --config "$config_path" &
+      PYTHONPATH="./:${PYTHONPATH:-}" \
+      "$PYTHON_BIN" tools/grounding_2d_stpls3d.py \
+      --config "$CONFIG_PATH" \
+      --scene-list "$SCENE_LIST" \
+      --worker-id "$worker_id" \
+      --num-workers "$NUM_WORKERS" \
+      "${EXTRA_ARGS[@]}" &
   fi
-  TASK_PID=$!
+  PIDS+=("$!")
 }
 
 stop_task() {
-  pid="$1"
-  if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+  local pid="$1"
+  if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
     return
   fi
 
   kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
 
-  retry=0
-  while [ "$retry" -lt 5 ] && kill -0 "$pid" 2>/dev/null; do
+  local retry=0
+  while [[ "$retry" -lt 5 ]] && kill -0 "$pid" 2>/dev/null; do
     sleep 1
     retry=$((retry + 1))
   done
@@ -51,34 +98,38 @@ stop_task() {
 cleanup() {
   echo
   echo "🛑 Interrupt received. Stopping background tasks..."
-  stop_task "$PID0"
-  stop_task "$PID1"
-  wait "$PID0" 2>/dev/null || true
-  wait "$PID1" 2>/dev/null || true
+  for pid in "${PIDS[@]}"; do
+    stop_task "$pid"
+  done
+  for pid in "${PIDS[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
   exit 130
 }
 
 trap cleanup INT TERM HUP
 
-echo "🚀 Starting GPU 0 task..."
-start_task 4 configs/stpls3d.yaml
-PID0="$TASK_PID"
+echo "📄 Scene list: $SCENE_LIST"
+echo "⚙️  Config: $CONFIG_PATH"
+echo "🖥️  GPUs: $GPU_IDS"
+echo "🚀 Launching $NUM_WORKERS workers..."
 
-echo "🚀 Starting GPU 1 task..."
-start_task 5 configs/stpls3d_1.yaml
-PID1="$TASK_PID"
+for idx in "${!GPU_ARRAY[@]}"; do
+  gpu_id="${GPU_ARRAY[$idx]}"
+  echo "🚀 Starting worker $idx on GPU $gpu_id..."
+  start_task "$idx" "$gpu_id"
+done
 
-echo "⏳ Waiting for both tasks to complete..."
-wait "$PID0"
-STATUS0=$?
-echo "✅ GPU 0 task finished."
+echo "⏳ Waiting for all workers to complete..."
+STATUS=0
+for idx in "${!PIDS[@]}"; do
+  pid="${PIDS[$idx]}"
+  if wait "$pid"; then
+    echo "✅ Worker $idx finished."
+  else
+    echo "❌ Worker $idx failed."
+    STATUS=1
+  fi
+done
 
-wait "$PID1"
-STATUS1=$?
-echo "✅ GPU 1 task finished."
-
-if [ "$STATUS0" -ne 0 ] || [ "$STATUS1" -ne 0 ]; then
-  exit 1
-fi
-
-echo "🎉 All done! Results saved in respective GPU directories."
+exit "$STATUS"

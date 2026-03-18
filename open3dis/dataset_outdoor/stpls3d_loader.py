@@ -79,6 +79,26 @@ class STPLS3DReader(object):
         intrinsic = np.load(intrinsic_path)
         return intrinsic
 
+    def read_valid_mask(self, valid_mask_path):
+        if not valid_mask_path or not os.path.exists(valid_mask_path):
+            return None
+        valid_mask = cv2.imread(valid_mask_path, cv2.IMREAD_GRAYSCALE)
+        if valid_mask is None:
+            return None
+        return valid_mask > 0
+
+    def read_coverage(self, coverage_path):
+        if not coverage_path or not os.path.exists(coverage_path):
+            return None
+        coverage = cv2.imread(coverage_path, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_GRAYSCALE)
+        return coverage
+
+    def read_frame_meta(self, meta_path):
+        if not meta_path or not os.path.exists(meta_path):
+            return {}
+        with np.load(meta_path) as data:
+            return {key: data[key] for key in data.files}
+
     def read_pointcloud(self, pcd_path=None):
         if pcd_path is None:
             pcd_path = self.scene_pcd_path
@@ -139,11 +159,17 @@ class STPLS3DReader(object):
         image_path = os.path.join(self.root_path, "color", framecolor)
         pose_path = os.path.join(self.root_path, "pose", framepose)
         intrinsic_path = os.path.join(self.root_path, "intrinsic", frameintrinsic)
+        valid_mask_path = os.path.join(self.root_path, "valid_mask", framecolor)
+        coverage_path = os.path.join(self.root_path, "coverage", framecolor)
+        meta_path = os.path.join(self.root_path, "meta", f"{frame_id}.npz")
         
         frame["depth_path"] = depth_image_path
         frame["image_path"] = image_path
         frame["pose_path"] = pose_path
         frame["intrinsic_path"] = intrinsic_path
+        frame["valid_mask_path"] = valid_mask_path
+        frame["coverage_path"] = coverage_path
+        frame["meta_path"] = meta_path
 
 
         return frame
