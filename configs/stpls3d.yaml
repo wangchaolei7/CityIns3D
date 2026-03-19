@@ -189,13 +189,13 @@ final_instance:
 exp:
   exp_name: "version_SAM3"  # for ablation study
   # exp_name: "version_YoloW-SAM"  # for ablation study
-  mask2d_output: 'mask_sam3_stage12' # final merged 2D masks
+  mask2d_output: 'mask_sam3_stage1' # final merged 2D masks /// stage12: 1+2 mask结果
   mask2d_output_stage1: 'mask_sam3_stage1'
   mask2d_output_stage2: 'mask_sam3_stage2'
   grounded_feat_output: 'grounded_feat' # first stage feature
   refined_grounded_feat_output: 'refined_grounded_feat' # second stage feature
   clustering_3d_output: '3d_ins_img16' # 2Dlift path
-  clustering_3d_output_lifted_part: '3d_ins_img16_lifted_part'
+  clustering_3d_output_lifted_part: '3d_ins_img16_lifted_part_stage1'
   final_output: 'final_result_hier_agglo' 
   save_dir: '/data1/wangcl/project/CityIns3D/stpls3d/'
 

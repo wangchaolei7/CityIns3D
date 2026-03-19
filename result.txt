@@ -1,2 +1,2 @@
 class,class id,ap,ap50,ap25
-class_agnostic,nan,nan,nan
+class_agnostic,0.20453616708427605,0.3013709523304624,0.4064634388212327

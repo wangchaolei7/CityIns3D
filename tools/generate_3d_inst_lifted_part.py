@@ -38,6 +38,9 @@ def get_parser():
     parser = argparse.ArgumentParser(description="Generate lifted-part 3D proposals for STPLS3D")
     parser.add_argument("--config", type=str, required=True, help="Path to yaml config")
     parser.add_argument("--scene", type=str, default=None, help="Optional single scene id")
+    parser.add_argument("--scene-list", type=str, default=None, help="Optional scene list override")
+    parser.add_argument("--worker-id", type=int, default=0, help="Worker shard index")
+    parser.add_argument("--num-workers", type=int, default=1, help="Total number of worker shards")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing outputs")
     parser.add_argument("--output-dir", type=str, default=None, help="Optional output dir override")
     return parser
@@ -58,8 +61,19 @@ if __name__ == "__main__":
     if args.scene:
         scene_ids = [args.scene]
     else:
-        with open(cfg.data.split_path, "r") as file:
+        scene_list_path = args.scene_list or cfg.data.split_path
+        with open(scene_list_path, "r") as file:
             scene_ids = sorted([line.rstrip("\n") for line in file])
+        if args.num_workers > 1:
+            if args.worker_id < 0 or args.worker_id >= args.num_workers:
+                raise ValueError(
+                    f"worker-id must be in [0, {args.num_workers}), got {args.worker_id}"
+                )
+            scene_ids = scene_ids[args.worker_id::args.num_workers]
+        print(
+            f"[LiftedPart] scene_list={scene_list_path} "
+            f"worker={args.worker_id}/{args.num_workers} num_scenes={len(scene_ids)}"
+        )
 
     output_dir = resolve_output_dir(cfg, args.output_dir)
     os.makedirs(output_dir, exist_ok=True)

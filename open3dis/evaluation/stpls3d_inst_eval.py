@@ -56,11 +56,10 @@ class stpls3dEval(object):
             for oi, iou_th in enumerate(ious):
                 pred_visited = {}
                 for m in matches:
-                    for p in matches[m]["pred"]:
-                        for label_name in self.eval_class_labels:
-                            for p in matches[m]["pred"][label_name]:
-                                if "filename" in p:
-                                    pred_visited[p["filename"]] = False
+                    for label_name in self.eval_class_labels:
+                        for pred in matches[m]["pred"][label_name]:
+                            if "filename" in pred:
+                                pred_visited[pred["filename"]] = False
                 for li, label_name in enumerate(self.eval_class_labels):
                     y_true = np.empty(0)
                     y_score = np.empty(0)
@@ -235,10 +234,12 @@ class stpls3dEval(object):
         for gt in agnostic_instances:
             gt["matched_pred"] = []
         gt2pred["class_agnostic"] = agnostic_instances
+        gt_index_by_id = {
+            int(gt["instance_id"]): gt_idx for gt_idx, gt in enumerate(gt2pred["class_agnostic"])
+        }
 
         pred2gt = {"class_agnostic": []}
         num_pred_instances = 0
-        bool_void = np.logical_not(np.in1d(gts // self.encode_value, self.valid_class_ids))
 
         for pred in preds:
             conf = pred["conf"]
@@ -258,17 +259,25 @@ class stpls3dEval(object):
                 "label_id": None,
                 "vert_count": num,
                 "confidence": conf,
-                "void_intersection": np.count_nonzero(np.logical_and(bool_void, pred_mask))
+                "void_intersection": 0,
             }
 
+            pred_gts = gts[pred_mask]
+            pred_instance["void_intersection"] = int(np.count_nonzero(pred_gts == 0))
+
             matched_gt = []
-            for gt_num, gt_inst in enumerate(gt2pred["class_agnostic"]):
-                intersection = np.count_nonzero(np.logical_and(gts == gt_inst["instance_id"], pred_mask))
-                if intersection > 0:
+            matched_gt_ids = pred_gts[pred_gts > 0]
+            if matched_gt_ids.size > 0:
+                unique_gt_ids, intersections = np.unique(matched_gt_ids, return_counts=True)
+                for gt_instance_id, intersection in zip(unique_gt_ids.tolist(), intersections.tolist()):
+                    gt_num = gt_index_by_id.get(int(gt_instance_id))
+                    if gt_num is None:
+                        continue
+                    gt_inst = gt2pred["class_agnostic"][gt_num]
                     gt_copy = gt_inst.copy()
                     pred_copy = pred_instance.copy()
-                    gt_copy["intersection"] = intersection
-                    pred_copy["intersection"] = intersection
+                    gt_copy["intersection"] = int(intersection)
+                    pred_copy["intersection"] = int(intersection)
                     iou = float(intersection) / (gt_copy["vert_count"] + pred_copy["vert_count"] - intersection)
                     gt_copy["iou"] = iou
                     pred_copy["iou"] = iou
@@ -344,7 +353,63 @@ class stpls3dEval(object):
                 ap25 = avgs["classes"][class_name]["ap25%"]
                 f.write(_SPLITTER.join([str(x) for x in [class_name, ap, ap50, ap25]]) + "\n")
 
-    def evaluate(self, pred_list, gt_sem_list, gt_ins_list, exp_path="./"):
+    def _scene_output_filename(self, output_tag=""):
+        if self.use_label:
+            filename = "scene_ovis_results.txt"
+        else:
+            filename = "zAPresults/stpls3d_zbuffer/uto_img16_s1.txt"
+        if not output_tag:
+            return filename
+        base, ext = os.path.splitext(filename)
+        return f"{base}_{output_tag}{ext}"
+
+    def _finalize_results(self, matches, scene_results, exp_path="./", output_tag=""):
+        ap_scores, rc_scores = self.evaluate_matches(matches)
+        avgs = self.compute_averages(ap_scores, rc_scores)
+
+        scene_results = list(scene_results)
+        scene_results.sort(key=lambda x: x["ap"], reverse=True)
+
+        output_path = os.path.join(exp_path, self._scene_output_filename(output_tag))
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+        with open(output_path, "w") as f:
+            f.write(f"# all_ap,{avgs['all_ap']:.6f}\n")
+            f.write(f"# all_ap_50,{avgs['all_ap_50%']:.6f}\n")
+            f.write(f"# all_ap_25,{avgs['all_ap_25%']:.6f}\n")
+            f.write(f"# all_rc,{avgs['all_rc']:.6f}\n")
+            f.write(f"# all_rc_50,{avgs['all_rc_50%']:.6f}\n")
+            f.write(f"# all_rc_25,{avgs['all_rc_25%']:.6f}\n")
+            f.write("scene_id,AP,AP_50%,AP_25%\n")
+            for result in scene_results:
+                f.write(f"{result['scene_id']},{result['ap']:.3f},{result['ap50']:.3f},{result['ap25']:.3f}\n")
+
+        result_filename = "result.txt" if not output_tag else f"result_{output_tag}.txt"
+        self.write_result_file(avgs, os.path.join(exp_path, result_filename))
+        self.print_results(avgs)
+
+        return avgs
+
+    def evaluate_precomputed(self, scene_entries, exp_path="./", output_tag=""):
+        matches = {}
+        scene_results = []
+        for i, entry in enumerate(scene_entries):
+            matches_key = f"gt_{i}"
+            matches[matches_key] = {
+                "gt": entry["gt"],
+                "pred": entry["pred"],
+            }
+            scene_results.append(
+                {
+                    "scene_id": entry["scene_id"],
+                    "ap": entry["ap"],
+                    "ap50": entry["ap50"],
+                    "ap25": entry["ap25"],
+                }
+            )
+        return self._finalize_results(matches, scene_results, exp_path=exp_path, output_tag=output_tag)
+
+    def evaluate(self, pred_list, gt_sem_list, gt_ins_list, exp_path="./", output_tag=""):
         scene_results = []
 
         results = []
@@ -370,25 +435,4 @@ class stpls3dEval(object):
                 "ap25": scene_avgs["all_ap_25%"]
             })
 
-        ap_scores, rc_scores = self.evaluate_matches(matches)
-        avgs = self.compute_averages(ap_scores, rc_scores)
-
-        scene_results.sort(key=lambda x: x["ap"], reverse=True)
-
-        if self.use_label:
-            output_filename = "scene_ovis_results.txt"
-        else:
-            # output_filename = "zAPresults/stpls3d_zbuffer/dbscan_growspp_img16_0.515_test.txt"
-            output_filename = "zAPresults/stpls3d_zbuffer/dbscan_spp_img8_0.550.txt"
-        output_path = os.path.join(exp_path, output_filename)
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-        with open(output_path, "w") as f:
-            f.write("scene_id,AP,AP_50%,AP_25%\n")
-            for result in scene_results:
-                f.write(f"{result['scene_id']},{result['ap']:.3f},{result['ap50']:.3f},{result['ap25']:.3f}\n")
-
-        self.write_result_file(avgs, os.path.join(exp_path, "result.txt"))
-        self.print_results(avgs)
-
-        return avgs
+        return self._finalize_results(matches, scene_results, exp_path=exp_path, output_tag=output_tag)

@@ -316,6 +316,7 @@ if __name__ == "__main__":
     print(spp_path)
     VIZ.superpointviz(spp_path)
     VIZ.vizmask2d(lifted_path, specific=args.specific_lifted)
+    VIZ.gtviz(gt_path, specific=False)
     
     if args.show_spp:
         VIZ.superpointviz(spp_path)
