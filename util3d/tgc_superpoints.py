@@ -8,6 +8,7 @@ import open3d as o3d
 import torch
 import torch.nn.functional as F
 
+from open3dis.dataset_outdoor.stpls3d_io import load_pointcloud_xyz_rgb, resolve_scene_path
 
 def _torch_load_local(path: str, map_location: str = "cpu"):
     try:
@@ -118,6 +119,16 @@ class TgcSuperpointGenerator:
         self.utonia_pca_fit_samples = int(getattr(sp_cfg, "tgc_utonia_pca_fit_samples", 20000))
         self.utonia_edge_weight_mode = getattr(sp_cfg, "tgc_utonia_edge_weight_mode", "similarity")
         self.utonia_edge_weight_floor = float(getattr(sp_cfg, "tgc_utonia_edge_weight_floor", 0.05))
+        self.auto_sparse_txt = bool(getattr(sp_cfg, "tgc_auto_sparse_txt", True))
+        self.txt_utonia_voxel_size = float(getattr(sp_cfg, "tgc_txt_utonia_voxel_size", 1.0))
+        self.txt_graph_connectivity = int(getattr(sp_cfg, "tgc_txt_graph_connectivity", 26))
+        self.txt_utonia_reg = float(getattr(sp_cfg, "tgc_txt_utonia_reg", 120.0))
+        self.txt_utonia_min_size = int(getattr(sp_cfg, "tgc_txt_utonia_min_size", self.utonia_min_size))
+        self.txt_utonia_k = int(getattr(sp_cfg, "tgc_txt_utonia_k", 8))
+        self.txt_utonia_w_adjacency = float(getattr(sp_cfg, "tgc_txt_utonia_w_adjacency", 1.0))
+        self.txt_utonia_edge_weight_floor = float(
+            getattr(sp_cfg, "tgc_txt_utonia_edge_weight_floor", 0.25)
+        )
 
     def generate_scene(self, scene_id: str, method: str):
         method = method.lower()
@@ -125,23 +136,25 @@ class TgcSuperpointGenerator:
             raise ValueError(f"Unsupported TGC method: {method}")
 
         stage_start = time.perf_counter()
-        coord, color = self._load_point_cloud(scene_id)
+        coord, color, source_path = self._load_point_cloud(scene_id)
         load_time = time.perf_counter() - stage_start
+
+        runtime_cfg = self._resolve_runtime_cfg(method, source_path)
 
         stage_start = time.perf_counter()
         point_feat = self._load_point_features(scene_id) if method == "tgc_utonia" else None
-        voxel_size = self.utonia_voxel_size if method == "tgc_utonia" else self.native_voxel_size
+        voxel_size = runtime_cfg["voxel_size"]
         voxel_pack = self._voxelize(coord, color, point_feat, voxel_size=voxel_size)
         voxel_time = time.perf_counter() - stage_start
 
         stage_start = time.perf_counter()
-        X, S, E, W, P = self._build_tgc_inputs(voxel_pack, method)
+        X, S, E, W, P = self._build_tgc_inputs(voxel_pack, method, runtime_cfg)
         build_time = time.perf_counter() - stage_start
 
-        reg = self.utonia_reg if method == "tgc_utonia" else self.native_reg
-        min_size = self.utonia_min_size if method == "tgc_utonia" else self.native_min_size
-        k = self.utonia_k if method == "tgc_utonia" else self.native_k
-        w_adjacency = self.utonia_w_adjacency if method == "tgc_utonia" else self.native_w_adjacency
+        reg = runtime_cfg["reg"]
+        min_size = runtime_cfg["min_size"]
+        k = runtime_cfg["k"]
+        w_adjacency = runtime_cfg["w_adjacency"]
 
         stage_start = time.perf_counter()
         if E.shape[1] == 0:
@@ -179,9 +192,13 @@ class TgcSuperpointGenerator:
             "depth": int(depth),
             "used_utonia_feature": method == "tgc_utonia",
             "device": str(self.device),
+            "source_format": os.path.splitext(source_path)[1].lstrip(".").lower(),
             "voxel_size": float(voxel_size),
             "reg": float(reg),
             "min_size": int(min_size),
+            "graph_connectivity": int(runtime_cfg["graph_connectivity"]),
+            "k": int(k),
+            "w_adjacency": float(w_adjacency),
             "load_time": float(load_time),
             "voxel_time": float(voxel_time),
             "build_time": float(build_time),
@@ -205,24 +222,48 @@ class TgcSuperpointGenerator:
             return torch.device("cpu")
         return device
 
-    def _load_point_cloud(self, scene_id: str) -> Tuple[np.ndarray, np.ndarray]:
-        ply_path = os.path.join(self.original_ply_root, f"{scene_id}.ply")
-        if not os.path.exists(ply_path):
-            raise FileNotFoundError(f"Missing point cloud file: {ply_path}")
-
-        point_cloud = o3d.io.read_point_cloud(ply_path)
-        coord = np.asarray(point_cloud.points, dtype=np.float32)
+    def _load_point_cloud(self, scene_id: str) -> Tuple[np.ndarray, np.ndarray, str]:
+        scene_path = resolve_scene_path(self.original_ply_root, scene_id)
+        coord, color = load_pointcloud_xyz_rgb(scene_path)
         if coord.ndim != 2 or coord.shape[1] != 3:
-            raise ValueError(f"Unexpected point cloud shape in '{ply_path}': {coord.shape}")
+            raise ValueError(f"Unexpected point cloud shape in '{scene_path}': {coord.shape}")
+        if color.size > 0 and color.max() <= 1.0 + 1e-6:
+            color = color * 255.0
+        return coord, color.astype(np.float32, copy=False), scene_path
 
-        if point_cloud.has_colors():
-            color = np.asarray(point_cloud.colors, dtype=np.float32)
-            if color.size > 0 and color.max() <= 1.0 + 1e-6:
-                color = color * 255.0
-        else:
-            color = np.zeros_like(coord, dtype=np.float32)
+    def _resolve_runtime_cfg(self, method: str, source_path: str):
+        if method == "tgc_native":
+            return {
+                "voxel_size": self.native_voxel_size,
+                "graph_connectivity": self.graph_connectivity,
+                "reg": self.native_reg,
+                "min_size": self.native_min_size,
+                "k": self.native_k,
+                "w_adjacency": self.native_w_adjacency,
+                "edge_weight_floor": self.utonia_edge_weight_floor,
+            }
 
-        return coord, color.astype(np.float32, copy=False)
+        source_ext = os.path.splitext(source_path)[1].lower()
+        if self.auto_sparse_txt and source_ext == ".txt":
+            return {
+                "voxel_size": self.txt_utonia_voxel_size,
+                "graph_connectivity": self.txt_graph_connectivity,
+                "reg": self.txt_utonia_reg,
+                "min_size": self.txt_utonia_min_size,
+                "k": self.txt_utonia_k,
+                "w_adjacency": self.txt_utonia_w_adjacency,
+                "edge_weight_floor": self.txt_utonia_edge_weight_floor,
+            }
+
+        return {
+            "voxel_size": self.utonia_voxel_size,
+            "graph_connectivity": self.graph_connectivity,
+            "reg": self.utonia_reg,
+            "min_size": self.utonia_min_size,
+            "k": self.utonia_k,
+            "w_adjacency": self.utonia_w_adjacency,
+            "edge_weight_floor": self.utonia_edge_weight_floor,
+        }
 
     def _load_point_features(self, scene_id: str) -> np.ndarray:
         feature_path = os.path.join(self.point_feature_dir, f"{scene_id}.pth")
@@ -283,8 +324,8 @@ class TgcSuperpointGenerator:
             "feat": voxel_feat,
         }
 
-    def _build_graph(self, grid_coord: np.ndarray):
-        offsets = _neighbor_offsets(self.graph_connectivity)
+    def _build_graph(self, grid_coord: np.ndarray, connectivity: int):
+        offsets = _neighbor_offsets(connectivity)
         index_map = {tuple(coord.tolist()): idx for idx, coord in enumerate(grid_coord)}
         edges = []
         weights = []
@@ -357,8 +398,11 @@ class TgcSuperpointGenerator:
         feat = _standardize(feat.astype(np.float32, copy=False))
         return feat, feat_tensor
 
-    def _build_tgc_inputs(self, voxel_pack: Dict[str, np.ndarray], method: str):
-        edge_index, edge_weight = self._build_graph(voxel_pack["grid_coord"])
+    def _build_tgc_inputs(self, voxel_pack: Dict[str, np.ndarray], method: str, runtime_cfg: Dict[str, float]):
+        edge_index, edge_weight = self._build_graph(
+            voxel_pack["grid_coord"],
+            connectivity=int(runtime_cfg["graph_connectivity"]),
+        )
 
         if method == "tgc_native":
             node_feat = self._build_native_node_features(voxel_pack["coord"], voxel_pack["color"])
@@ -371,7 +415,7 @@ class TgcSuperpointGenerator:
             if edge_index.shape[1] > 0 and self.utonia_edge_weight_mode == "similarity":
                 sim = F.cosine_similarity(feat_tensor[edge_index[0]], feat_tensor[edge_index[1]], dim=1)
                 sim = sim.clamp(min=0.0)
-                sim = sim.clamp_min(self.utonia_edge_weight_floor)
+                sim = sim.clamp_min(float(runtime_cfg["edge_weight_floor"]))
                 edge_weight_t = edge_weight_t * sim
 
         size_t = torch.from_numpy(voxel_pack["counts"]).to(self.device, dtype=torch.float32)

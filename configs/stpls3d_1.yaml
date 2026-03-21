@@ -139,6 +139,14 @@ superpoint:
   tgc_utonia_pca_fit_samples: 20000
   tgc_utonia_edge_weight_mode: 'similarity'
   tgc_utonia_edge_weight_floor: 0.05
+  tgc_auto_sparse_txt: True
+  tgc_txt_utonia_voxel_size: 1.0
+  tgc_txt_graph_connectivity: 26
+  tgc_txt_utonia_reg: 120.0
+  tgc_txt_utonia_min_size: 256
+  tgc_txt_utonia_k: 8
+  tgc_txt_utonia_w_adjacency: 1.0
+  tgc_txt_utonia_edge_weight_floor: 0.25
 
 cluster:
   visi: 0.9 # iou

@@ -20,7 +20,7 @@ foundation_model:
   sam3_log_timing: False
   sam3_compile: False
   sam3_stage2_enable: True
-  sam3_stage2_spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_utonia_reg200'
+  sam3_stage2_spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_utonia_reg20'
   sam3_stage2_visible_ratio_thresh: 0.3
   sam3_stage2_min_uncovered_pixels: 100
   sam3_stage2_overlap_with_stage1_thresh: 0.5
@@ -79,8 +79,8 @@ data:
   datapath: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/2D' # RGB-D + pose path
   gt_pth: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/groundtruth' # gt path
   original_ply: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/original_ply_files' # raw pcl
-  spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_utonia' 
-  # spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_utonia_reg200'
+  # spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_utonia' 
+  spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_utonia_reg20'
   # spp_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_native' 
   point_features_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/utonia_point_features' # point-level feature path
   cls_agnostic_3d_proposals_path: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/isbnet_clsagnostic_scannet200' # cls agnostic 3D proposals
@@ -113,14 +113,14 @@ superpoint:
   fallback_num_prototypes: 256
   component_connectivity: 6
   tgc_native_output_dir: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_native'
-  tgc_utonia_output_dir: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_utonia_reg200'
+  tgc_utonia_output_dir: '/data1/wangcl/dataset/open_3d/STPLS3D_Open3DIS/3D/tgc_superpoints_utonia_reg20'
   tgc_voxel_size: 0.1
   tgc_native_voxel_size: 0.25
   tgc_utonia_voxel_size: 0.25
   tgc_graph_connectivity: 6
   tgc_reg: 1.0
   tgc_native_reg: 5.0
-  tgc_utonia_reg: 200.0
+  tgc_utonia_reg: 40.0
   tgc_min_size: 64
   tgc_native_min_size: 256
   tgc_utonia_min_size: 256
@@ -139,6 +139,14 @@ superpoint:
   tgc_utonia_pca_fit_samples: 20000
   tgc_utonia_edge_weight_mode: 'similarity'
   tgc_utonia_edge_weight_floor: 0.05
+  tgc_auto_sparse_txt: True
+  tgc_txt_utonia_voxel_size: 1.2
+  tgc_txt_graph_connectivity: 26
+  tgc_txt_utonia_reg: 40.0
+  tgc_txt_utonia_min_size: 64
+  tgc_txt_utonia_k: -1
+  tgc_txt_utonia_w_adjacency: 1.0
+  tgc_txt_utonia_edge_weight_floor: 0.02
 
 cluster:
   visi: 0.9 # iou

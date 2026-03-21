@@ -6,6 +6,7 @@ import numpy as np
 import open3d as o3d
 import torch
 
+from open3dis.dataset_outdoor.stpls3d_io import load_pointcloud_xyz_rgb
 
 _SAVE_DTYPES = {
     "float16": torch.float16,
@@ -127,22 +128,13 @@ class UtoniaPointFeatureExtractor:
         return _SAVE_DTYPES[dtype_name]
 
     def _load_point_cloud(self, ply_path: str) -> Tuple[Dict[str, np.ndarray], int]:
-        point_cloud = o3d.io.read_point_cloud(ply_path)
-        coord = np.asarray(point_cloud.points, dtype=np.float32)
+        coord, color = load_pointcloud_xyz_rgb(ply_path)
         if coord.ndim != 2 or coord.shape[1] != 3:
             raise ValueError(f"Unexpected point cloud shape in '{ply_path}': {coord.shape}")
 
-        if point_cloud.has_colors():
-            color = np.asarray(point_cloud.colors, dtype=np.float32)
-            if color.size > 0 and color.max() <= 1.0 + 1e-6:
-                color = color * 255.0
-        else:
-            color = np.zeros_like(coord, dtype=np.float32)
-
-        if point_cloud.has_normals():
-            normal = np.asarray(point_cloud.normals, dtype=np.float32)
-        else:
-            normal = np.zeros_like(coord, dtype=np.float32)
+        if color.size > 0 and color.max() <= 1.0 + 1e-6:
+            color = color * 255.0
+        normal = np.zeros_like(coord, dtype=np.float32)
 
         point_dict = {
             "coord": coord.astype(np.float32, copy=False),

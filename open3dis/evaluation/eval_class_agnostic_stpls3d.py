@@ -10,7 +10,7 @@ from munch import Munch
 
 from stpls3d_inst_eval import stpls3dEval
 from open3dis.dataset_outdoor.stpls3d import INSTANCE_CAT_STPLS3D
-from plyfile import PlyData
+from open3dis.dataset_outdoor.stpls3d_io import load_semantic_instance, resolve_scene_path
 
 
 def torch_load_local(path):
@@ -66,11 +66,9 @@ def process_scene_for_eval(task):
     except Exception as exc:
         return {"status": "skip", "scene": scene, "reason": f"load failed: {exc}"}
 
-    gt_path = os.path.join(pcl_path, scene.replace(".pth", ".ply"))
-    plydata = PlyData.read(gt_path)
-    vertex = plydata['vertex']
-    sem_gt = vertex['semantic'].astype(np.int32)
-    inst_gt = vertex['instance'].astype(np.int32)
+    scene_id = scene.replace(".pth", "")
+    gt_path = resolve_scene_path(pcl_path, scene_id)
+    sem_gt, inst_gt = load_semantic_instance(gt_path)
 
     scan_eval = stpls3dEval(class_labels=class_labels, use_label=False, dataset_name=dataset_name)
     valid_mask = np.isin(sem_gt, valid_semantic_ids)
@@ -89,7 +87,6 @@ def process_scene_for_eval(task):
 
     masks = pred_mask['ins']
     confs = pred_mask.get("conf", None)
-    scene_id = scene.replace(".pth", "")
     tmp = []
     for ind, encoded_mask in enumerate(masks):
         if isinstance(encoded_mask, dict):

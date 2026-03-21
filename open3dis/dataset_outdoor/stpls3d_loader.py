@@ -6,6 +6,8 @@ import os
 import torch
 import open3d as o3d
 
+from open3dis.dataset_outdoor.stpls3d_io import load_pointcloud_xyz, resolve_scene_path
+
 class STPLS3DReader(object):
     def __init__(
         self,
@@ -49,7 +51,7 @@ class STPLS3DReader(object):
             self.intrinsic = None
             print('No global intrinsic')
 
-        self.scene_pcd_path = os.path.join(cfg.data.original_ply, f"{self.scene_id}.ply")
+        self.scene_pcd_path = resolve_scene_path(cfg.data.original_ply, self.scene_id)
 
     def __iter__(self):
         return self
@@ -102,10 +104,7 @@ class STPLS3DReader(object):
     def read_pointcloud(self, pcd_path=None):
         if pcd_path is None:
             pcd_path = self.scene_pcd_path
-        scene_pcd = o3d.io.read_point_cloud(str(pcd_path))
-        point = np.array(scene_pcd.points)
-
-        return point
+        return load_pointcloud_xyz(pcd_path)
     
     # def read_gt_3D(self, gt_path):
     #     _, _, sem_gt, inst_gt = torch.load(gt_path)

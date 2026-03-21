@@ -7,6 +7,7 @@ import torch
 from sklearn.cluster import DBSCAN, MiniBatchKMeans
 from sklearn.decomposition import PCA
 
+from open3dis.dataset_outdoor.stpls3d_io import load_pointcloud_xyz, resolve_scene_path
 
 def _row_normalize(x: np.ndarray) -> np.ndarray:
     norm = np.linalg.norm(x, axis=1, keepdims=True)
@@ -198,18 +199,10 @@ class UtoniaSuperpointGenerator:
         return device
 
     def _load_point_coord(self, scene_id: str) -> np.ndarray:
-        ply_path = os.path.join(self.original_ply_root, f"{scene_id}.ply")
-        if not os.path.exists(ply_path):
-            raise FileNotFoundError(f"Missing point cloud file: {ply_path}")
-
-        with open(ply_path, "r", encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip() == "end_header":
-                    break
-            coord = np.loadtxt(handle, usecols=(0, 1, 2), dtype=np.float32)
-
+        scene_path = resolve_scene_path(self.original_ply_root, scene_id)
+        coord = load_pointcloud_xyz(scene_path)
         if coord.ndim != 2 or coord.shape[1] != 3:
-            raise ValueError(f"Unexpected coord shape in '{ply_path}': {coord.shape}")
+            raise ValueError(f"Unexpected coord shape in '{scene_path}': {coord.shape}")
         return coord
 
     def _load_point_features(self, scene_id: str) -> Tuple[np.ndarray, Dict[str, bool]]:

@@ -45,7 +45,7 @@
 
 			// Compute attenuated point size based on distance to camera
 			vec3 vertex_position_camera = (modelViewMatrix * vec4(position, 1.0)).xyz;
-			gl_PointSize = pointSize / length(vertex_position_camera);
+			gl_PointSize = max(pointSize, 1.0);
 
 			if (shading_type == 0) {  // Uniform shading
 				vColor = vec4(color, alpha);

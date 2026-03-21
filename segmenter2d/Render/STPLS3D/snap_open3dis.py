@@ -4,6 +4,7 @@ import numpy as np
 from pytorch3d.io import IO
 from pytorch3d.renderer import (
     PerspectiveCameras,
+    FoVOrthographicCameras,
     RasterizationSettings,
     MeshRenderer,
     MeshRasterizer,
@@ -30,11 +31,17 @@ import cv2 # <--- 确保导入cv2
 # sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # from utils import mask_lable_location, mask_rasterization
 
+# Orthographic top-view controls.
+# Edit here directly; no CLI flag is required.
+ORTHO_TOP_USE_MARGIN = True
+ORTHO_TOP_MARGIN = 1.10
+
 class Snap:
-    def __init__(self, image_size, adjust_camera, save_folder, device=None):
+    def __init__(self, image_size, adjust_camera, save_folder, device=None, fit_to_frame=True):
         self.image_width, self.image_height = image_size
         self.lift_cam, self.zoomout, self.remove_lip = adjust_camera
         self.save_folder = save_folder
+        self.fit_to_frame = fit_to_frame
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
@@ -47,8 +54,11 @@ class Snap:
         return data[:, :6]
     
     def read_txt_point_cloud(self, filepath):
-        # 读取txt格式的点云，假设每行格式为 x y z r g b semantic
-        data = np.loadtxt(filepath)
+        # 支持逗号分隔或空白分隔的 txt 点云，假设至少包含 xyzrgb
+        try:
+            data = np.loadtxt(filepath, delimiter=",")
+        except ValueError:
+            data = np.loadtxt(filepath)
         if data.shape[1] < 6:
             print(f"Error: txt文件的点云数据至少需要6列（xyzrgb） in {filepath}")
             return None
@@ -119,8 +129,8 @@ class Snap:
             
         raster_settings = PointsRasterizationSettings(
                 image_size=(height, width), 
-                radius = 0.007, # 0.007
-                points_per_pixel = 10
+                radius = 0.009, # 0.007
+                points_per_pixel = 10 # 10
                 )
 
         rasterizer = PointsRasterizer(cameras=camera, raster_settings=raster_settings) 
@@ -170,6 +180,91 @@ class Snap:
         color_img = (color_img[:, :, :3] * 255).astype(np.uint8)  
         Image.fromarray(color_img).save(depth_name.replace(".npy", "_color.png"))
 
+    def render_pcd_orthographic(
+        self,
+        pose,
+        ortho_bounds,
+        image_width,
+        image_height,
+        pcd,
+        name,
+        depth_name,
+        valid_mask_name,
+        coverage_name,
+        meta_name,
+    ):
+        device = self.device
+        pcd = pcd.to(device=device, dtype=torch.float32)
+        point_cloud = Pointclouds(points=[pcd[:, :3]], features=[pcd[:, 3:6] / 255.0])
+
+        camera_to_world = torch.from_numpy(pose).to(device=device, dtype=torch.float32)
+        world_to_camera = torch.inverse(camera_to_world)
+        rotation_matrix = world_to_camera[:3, :3].permute(1, 0).unsqueeze(0)
+        translation_vector = world_to_camera[:3, 3].reshape(-1, 1).permute(1, 0)
+
+        camera = FoVOrthographicCameras(
+            R=rotation_matrix,
+            T=translation_vector,
+            znear=0.01,
+            zfar=1e4,
+            max_x=float(ortho_bounds["max_x"]),
+            min_x=float(ortho_bounds["min_x"]),
+            max_y=float(ortho_bounds["max_y"]),
+            min_y=float(ortho_bounds["min_y"]),
+            scale_xyz=((1.0, 1.0, 1.0),),
+            device=device,
+        )
+
+        raster_settings = PointsRasterizationSettings(
+            image_size=(image_height, image_width),
+            radius=0.010,
+            points_per_pixel=10,
+        )
+
+        rasterizer = PointsRasterizer(cameras=camera, raster_settings=raster_settings)
+        renderer = PointsRenderer(
+            rasterizer=rasterizer,
+            compositor=AlphaCompositor(background_color=(1.0, 1.0, 1.0))
+        )
+
+        rendered_image = renderer(point_cloud)
+        rendered_image = (rendered_image[0].cpu().numpy() * 255).astype(np.uint8)
+        color = rendered_image[..., :3]
+        Image.fromarray(color).save(name)
+
+        fragments = rasterizer(point_cloud, cameras=camera)
+        zbuf = fragments.zbuf[0, ..., 0].cpu().numpy()
+        idx = fragments.idx[0].cpu().numpy()
+        valid_mask = np.any(idx >= 0, axis=2) & (zbuf > 0)
+        coverage = np.sum(idx >= 0, axis=2).astype(np.uint16)
+        valid_bbox = self._compute_valid_bbox(valid_mask)
+        valid_pixel_count = int(valid_mask.sum())
+        valid_ratio = float(valid_pixel_count) / float(valid_mask.size)
+
+        zbuf[zbuf < 0] = 0
+        depth_image_path = depth_name.replace(".npy", ".tif")
+        cv2.imwrite(depth_image_path, zbuf)
+        cv2.imwrite(valid_mask_name, (valid_mask.astype(np.uint8) * 255))
+        cv2.imwrite(coverage_name, coverage)
+        np.savez_compressed(
+            meta_name,
+            valid_bbox=valid_bbox,
+            valid_pixel_count=np.int64(valid_pixel_count),
+            valid_ratio=np.float32(valid_ratio),
+            coverage_max=np.int32(int(coverage.max()) if coverage.size > 0 else 0),
+            image_size=np.array([image_height, image_width], dtype=np.int32),
+            projection_type="orthographic",
+            ortho_bounds=np.array(
+                [
+                    ortho_bounds["min_x"],
+                    ortho_bounds["max_x"],
+                    ortho_bounds["min_y"],
+                    ortho_bounds["max_y"],
+                ],
+                dtype=np.float32,
+            ),
+        )
+
 
     def scene_image_rendering(self, scan_pc_raw, scene_name, mode = ["global"]):
         self.scene_name = scene_name
@@ -200,26 +295,26 @@ class Snap:
             os.makedirs(folder, exist_ok=True)
 
         w_raw, l_raw, h_raw, scene_center = self.get3d_box_from_pcs(scan_pc_raw)
-        scale_factor = self.zoomout + 1
+        scale_factor = self.zoomout + 2
         w, l, h = w_raw * scale_factor, l_raw * scale_factor, h_raw * scale_factor
 
-        extrinsic_list = []
-        intrinsic_list = []
-        generation_functions = {"global": self.global_level_camera_generation}
+        view_specs = []
+        generation_functions = {
+            "global": self.global_level_camera_generation,
+            "ortho_top": self.orthographic_top_camera_generation,
+        }
         for mode_key, func in generation_functions.items():
             if mode_key in mode:
-                extrinsic, intrinsic = func(w, l, h, scene_center, scan_pc_raw)
-                extrinsic_list.extend(extrinsic)
-                intrinsic_list.extend(intrinsic)
+                view_specs.extend(func(w, l, h, scene_center, scan_pc_raw))
 
-        print(f"***** Start to render snap images for {scene_name} ({len(extrinsic_list)} views) *****")
+        print(f"***** Start to render snap images for {scene_name} ({len(view_specs)} views) *****")
 
-        for i in range(len(extrinsic_list)):
-            sys.stdout.write(f"\r- Rendering view {i + 1}/{len(extrinsic_list)}")
+        for i, view_spec in enumerate(view_specs):
+            sys.stdout.write(f"\r- Rendering view {i + 1}/{len(view_specs)}")
             sys.stdout.flush()
 
-            extrinsic = extrinsic_list[i]
-            intrinsic = intrinsic_list[i]
+            extrinsic = view_spec["pose"]
+            intrinsic = view_spec["intrinsic"]
             
             # 统一文件名格式
             file_base_name = f"{i:04d}"
@@ -234,29 +329,42 @@ class Snap:
 
             np.save(intrinsic_path, intrinsic)
             np.save(pose_path, extrinsic)
-            
-            self.render_pcd(
-                extrinsic,
-                intrinsic[:3, :3],
-                self.image_width,
-                self.image_height,
-                scan_pc.to(self.device),
-                color_path,
-                depth_path,
-                valid_mask_path,
-                coverage_path,
-                meta_path,
-            )
+
+            if view_spec["camera_type"] == "orthographic":
+                self.render_pcd_orthographic(
+                    extrinsic,
+                    view_spec["ortho_bounds"],
+                    self.image_width,
+                    self.image_height,
+                    scan_pc.to(self.device),
+                    color_path,
+                    depth_path,
+                    valid_mask_path,
+                    coverage_path,
+                    meta_path,
+                )
+            else:
+                self.render_pcd(
+                    extrinsic,
+                    intrinsic[:3, :3],
+                    self.image_width,
+                    self.image_height,
+                    scan_pc.to(self.device),
+                    color_path,
+                    depth_path,
+                    valid_mask_path,
+                    coverage_path,
+                    meta_path,
+                )
         print("\n-> Rendering complete.")
-        return extrinsic, intrinsic
+        return view_specs[-1]["pose"], view_specs[-1]["intrinsic"]
 
     # ===================================================================
     # 以下函数保持您提供的原始版本，未做任何修改
     # ===================================================================
     
     def global_level_camera_generation(self, w, l, h, scene_center, scan_pc):
-        extrinsic_list = []
-        intrinsic_list = []
+        view_specs = []
         camera_locations = self.generate_camera_locations(scene_center, w, l, h, 5) # num_splits=5，控制摄像机位置的密度
         for camera_location in camera_locations:
             camera_location[-1] += self.lift_cam
@@ -265,9 +373,52 @@ class Snap:
             intrinsic_calibrated = self.intrinsic_calibration(
                 scan_pc, pose_to_RBT, self.image_width, self.image_height
             )
-            extrinsic_list.append(pose_to_RBT)
-            intrinsic_list.append(intrinsic_calibrated)
-        return extrinsic_list, intrinsic_list
+            view_specs.append(
+                {
+                    "camera_type": "perspective",
+                    "pose": pose_to_RBT,
+                    "intrinsic": intrinsic_calibrated,
+                }
+            )
+        return view_specs
+
+    def orthographic_top_camera_generation(self, w, l, h, scene_center, scan_pc):
+        raw_w, raw_l, raw_h, raw_center = self.get3d_box_from_pcs(scan_pc)
+        camera_location = np.array(
+            [
+                raw_center[0],
+                raw_center[1],
+                raw_center[2] + h / 2.0 + self.lift_cam,
+            ],
+            dtype=np.float32,
+        )
+        target = np.array([raw_center[0], raw_center[1], raw_center[2]], dtype=np.float32)
+        pose_matrix = self.lookat(camera_location, target, np.array([0, 1, 0], dtype=np.float32))
+        pose_to_RBT = np.transpose(np.linalg.inv(np.transpose(pose_matrix)))
+
+        # Keep a placeholder intrinsic on disk for compatibility. Orthographic rendering
+        # uses ortho_bounds from the view spec and records projection_type in meta.
+        intrinsic_placeholder = np.eye(4, dtype=np.float32)
+        if ORTHO_TOP_USE_MARGIN:
+            ortho_w = raw_w * ORTHO_TOP_MARGIN
+            ortho_l = raw_l * ORTHO_TOP_MARGIN
+        else:
+            ortho_w = w
+            ortho_l = l
+        ortho_bounds = {
+            "min_x": -float(ortho_w / 2.0),
+            "max_x": float(ortho_w / 2.0),
+            "min_y": -float(ortho_l / 2.0),
+            "max_y": float(ortho_l / 2.0),
+        }
+        return [
+            {
+                "camera_type": "orthographic",
+                "pose": pose_to_RBT,
+                "intrinsic": intrinsic_placeholder,
+                "ortho_bounds": ortho_bounds,
+            }
+        ]
 
     def intrinsic_calibration(self, point_cloud, pose, width, height):
         depth_intrinsic = np.array([
@@ -276,6 +427,8 @@ class Snap:
             [0.000000, 0.000000, 1.000000, 0.000000],
             [0.000000, 0.000000, 0.000000, 1.000000],
         ])
+        if not self.fit_to_frame:
+            return depth_intrinsic.copy()
         fx, fy = depth_intrinsic[0, 0], depth_intrinsic[1, 1]
         cx, cy = depth_intrinsic[0, 2], depth_intrinsic[1, 2]
         points = np.hstack([point_cloud[:, :3], np.ones((point_cloud.shape[0], 1))])
@@ -344,9 +497,22 @@ def main():
     )
     parser.add_argument("--image-width", type=int, default=2000)
     parser.add_argument("--image-height", type=int, default=2000)
-    parser.add_argument("--lift-cam", type=float, default=1.0)
-    parser.add_argument("--zoomout", type=float, default=1.0)
+    parser.add_argument("--lift-cam", type=float, default=10.0)
+    parser.add_argument("--zoomout", type=float, default=2.0)
     parser.add_argument("--remove-lip", type=float, default=0.0)
+    parser.add_argument(
+        "--fit-to-frame",
+        dest="fit_to_frame",
+        action="store_true",
+        help="Recalibrate intrinsics to fit the whole scene into the image.",
+    )
+    parser.add_argument(
+        "--no-fit-to-frame",
+        dest="fit_to_frame",
+        action="store_false",
+        help="Keep the original camera intrinsic without resizing the scene to fill the image.",
+    )
+    parser.set_defaults(fit_to_frame=True)
     parser.add_argument("--device", default=None)
     parser.add_argument("--worker-id", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=1)
@@ -355,8 +521,14 @@ def main():
     parser.add_argument(
         "--modes",
         nargs="+",
-        default=["global"],
-        help="Rendering modes. Current snap_open3dis.py supports global only.",
+        default=["global", "ortho_top"],
+        help="Rendering modes. Supported: global, ortho_top.",
+    )
+    parser.add_argument(
+        "--input-format",
+        choices=["auto", "npy", "txt"],
+        default="auto",
+        help="Input point cloud format. auto searches txt first, then npy.",
     )
     args = parser.parse_args()
 
@@ -364,18 +536,26 @@ def main():
         raise ValueError("--num-workers must be positive")
     if args.worker_id < 0 or args.worker_id >= args.num_workers:
         raise ValueError("--worker-id must satisfy 0 <= worker-id < num-workers")
-    unsupported_modes = [mode for mode in args.modes if mode != "global"]
+    supported_modes = {"global", "ortho_top"}
+    unsupported_modes = [mode for mode in args.modes if mode not in supported_modes]
     if unsupported_modes:
-        print(f"警告: snap_open3dis.py 当前仅支持 global 模式，以下模式将被忽略: {unsupported_modes}")
-        args.modes = [mode for mode in args.modes if mode == "global"] or ["global"]
+        print(f"警告: snap_open3dis.py 不支持以下模式，将被忽略: {unsupported_modes}")
+        args.modes = [mode for mode in args.modes if mode in supported_modes] or ["global"]
 
     adjust_camera = [args.lift_cam, args.zoomout, args.remove_lip]
     image_size = [args.image_width, args.image_height]
 
-    file_pattern = os.path.join(args.input_root, "*_points_GTv3_*.npy")
-    npy_files = sorted(glob.glob(file_pattern))
-    if not npy_files:
-        print(f"错误: 未找到匹配 '{file_pattern}' 的文件。请检查INPUT_ROOT路径。")
+    if args.input_format == "txt":
+        input_files = sorted(glob.glob(os.path.join(args.input_root, "*_points_GTv3_*.txt")))
+    elif args.input_format == "npy":
+        input_files = sorted(glob.glob(os.path.join(args.input_root, "*_points_GTv3_*.npy")))
+    else:
+        input_files = sorted(glob.glob(os.path.join(args.input_root, "*_points_GTv3_*.txt")))
+        if not input_files:
+            input_files = sorted(glob.glob(os.path.join(args.input_root, "*_points_GTv3_*.npy")))
+
+    if not input_files:
+        print(f"错误: 未在 '{args.input_root}' 中找到匹配的 txt/npy 场景文件。")
         return
 
     selected_scenes = set(args.scene or [])
@@ -384,16 +564,16 @@ def main():
             selected_scenes.update(line.strip() for line in f if line.strip())
 
     if selected_scenes:
-        npy_files = [
-            path for path in npy_files
-            if os.path.basename(path).replace(".npy", "") in selected_scenes
+        input_files = [
+            path for path in input_files
+            if os.path.splitext(os.path.basename(path))[0] in selected_scenes
         ]
 
-    if not npy_files:
+    if not input_files:
         print("错误: 经过 scene 过滤后没有待处理场景。")
         return
 
-    sharded_files = npy_files[args.worker_id::args.num_workers]
+    sharded_files = input_files[args.worker_id::args.num_workers]
     if not sharded_files:
         print(
             f"worker {args.worker_id}/{args.num_workers} 没有分到场景。"
@@ -402,19 +582,30 @@ def main():
 
     device_name = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(
-        f"总场景数={len(npy_files)} 当前worker场景数={len(sharded_files)} "
-        f"worker={args.worker_id}/{args.num_workers} device={device_name} modes={args.modes}"
+        f"总场景数={len(input_files)} 当前worker场景数={len(sharded_files)} "
+        f"worker={args.worker_id}/{args.num_workers} device={device_name} "
+        f"modes={args.modes} input_format={args.input_format} "
+        f"fit_to_frame={args.fit_to_frame}"
     )
 
-    for npy_path in tqdm(sharded_files, desc=f"worker{args.worker_id}"):
-        scene_name = os.path.basename(npy_path).replace('.npy', '')
+    for input_path in tqdm(sharded_files, desc=f"worker{args.worker_id}"):
+        scene_name = os.path.splitext(os.path.basename(input_path))[0]
         tqdm.write(f"\n--- 开始处理场景: {scene_name} ---")
 
         scene_output_dir = os.path.join(args.output_root, scene_name)
         
-        snap_module = Snap(image_size, adjust_camera, scene_output_dir, device=device_name)
+        snap_module = Snap(
+            image_size,
+            adjust_camera,
+            scene_output_dir,
+            device=device_name,
+            fit_to_frame=args.fit_to_frame,
+        )
 
-        pcd_rgb = snap_module.read_npy_point_cloud(npy_path)
+        if input_path.endswith(".txt"):
+            pcd_rgb = snap_module.read_txt_point_cloud(input_path)
+        else:
+            pcd_rgb = snap_module.read_npy_point_cloud(input_path)
         if pcd_rgb is None:
             tqdm.write(f"!! 跳过场景 {scene_name} 因为点云加载失败。")
             continue
