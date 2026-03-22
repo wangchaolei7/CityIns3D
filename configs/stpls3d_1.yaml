@@ -30,6 +30,20 @@ foundation_model:
   sam3_stage2_max_prompts_per_frame: 32
   sam3_stage2_region_dilate: 5
   sam3_stage2_region_close: 5
+  mapping_log_profile: True
+  mapping_auto_sparse_txt: True
+  mapping_visibility_threshold: 1.0
+  mapping_visibility_mode: "dynamic"
+  mapping_dynamic_vis_scale: 0.01
+  mapping_dynamic_vis_min: 0.05
+  mapping_ply_visibility_threshold: 1.0
+  mapping_ply_visibility_mode: "dynamic"
+  mapping_ply_dynamic_vis_scale: 0.01
+  mapping_ply_dynamic_vis_min: 0.05
+  mapping_txt_visibility_threshold: 1.0
+  mapping_txt_visibility_mode: "dynamic"
+  mapping_txt_dynamic_vis_scale: 0.03
+  mapping_txt_dynamic_vis_min: 0.20
   mask_valid_crop_pad: 10
   mask_valid_close: 11
   mask_valid_dilate: 5

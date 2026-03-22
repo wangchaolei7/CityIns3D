@@ -14,7 +14,7 @@ foundation_model:
   # SAM3
   sam3_repo_path: '/home/wangcl/sam3'
   sam3_checkpoint: '/data1/wangcl/project/CityIns3D/sam3_checkpoint/sam3.pt'
-  sam3_confidence_threshold: 0.4
+  sam3_confidence_threshold: 0.35
   sam3_prompt_template: '{label}'
   sam3_inference_mode: 'batched' # 或 'sequential'
   sam3_log_timing: False
@@ -25,11 +25,25 @@ foundation_model:
   sam3_stage2_min_uncovered_pixels: 100
   sam3_stage2_overlap_with_stage1_thresh: 0.5
   sam3_stage2_nms_iou_thresh: 0.5
-  sam3_stage2_confidence_threshold: 0.5
-  sam3_stage2_uncovered_purity_thresh: 0.5
-  sam3_stage2_max_prompts_per_frame: 16
+  sam3_stage2_confidence_threshold: 0.3
+  sam3_stage2_uncovered_purity_thresh: 0.2
+  sam3_stage2_max_prompts_per_frame: 32
   sam3_stage2_region_dilate: 5
   sam3_stage2_region_close: 5
+  mapping_log_profile: True
+  mapping_auto_sparse_txt: True
+  mapping_visibility_threshold: 1.0
+  mapping_visibility_mode: "dynamic"
+  mapping_dynamic_vis_scale: 0.01
+  mapping_dynamic_vis_min: 0.05
+  mapping_ply_visibility_threshold: 1.0
+  mapping_ply_visibility_mode: "dynamic"
+  mapping_ply_dynamic_vis_scale: 0.01
+  mapping_ply_dynamic_vis_min: 0.05
+  mapping_txt_visibility_threshold: 1.0
+  mapping_txt_visibility_mode: "dynamic"
+  mapping_txt_dynamic_vis_scale: 0.03
+  mapping_txt_dynamic_vis_min: 0.20
   mask_valid_crop_pad: 10
   mask_valid_close: 11
   mask_valid_dilate: 5
@@ -197,13 +211,13 @@ final_instance:
 exp:
   exp_name: "version_SAM3"  # for ablation study
   # exp_name: "version_YoloW-SAM"  # for ablation study
-  mask2d_output: 'mask_sam3_stage1' # final merged 2D masks /// stage12: 1+2 mask结果
+  mask2d_output: 'mask_sam3_stage12' # final merged 2D masks /// stage12: 1+2 mask结果
   mask2d_output_stage1: 'mask_sam3_stage1'
   mask2d_output_stage2: 'mask_sam3_stage2'
   grounded_feat_output: 'grounded_feat' # first stage feature
   refined_grounded_feat_output: 'refined_grounded_feat' # second stage feature
   clustering_3d_output: '3d_ins_img16' # 2Dlift path
-  clustering_3d_output_lifted_part: '3d_ins_img16_lifted_part_stage1'
+  clustering_3d_output_lifted_part: 'txt_3d_ins_img16_lifted_part_stage12'
   final_output: 'final_result_hier_agglo' 
   save_dir: '/data1/wangcl/project/CityIns3D/stpls3d/'
 

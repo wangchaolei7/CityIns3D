@@ -38,10 +38,23 @@ class BaseMaskStpls3d:
         """
         scene_dir = os.path.join(cfg.data.datapath, scene_id)
         loader = build_dataset(root_path=scene_dir, cfg=cfg)
+        mapping_cfg = self._resolve_mapping_cfg(cfg=cfg, scene_pcd_path=getattr(loader, "scene_pcd_path", None))
         pointcloud_mapper = PointCloudToImageMapper(
             image_dim=cfg.data.img_dim,
             cut_bound=cfg.data.cut_num_pixel_boundary,
+            visibility_threshold=mapping_cfg["visibility_threshold"],
+            visibility_mode=mapping_cfg["visibility_mode"],
+            dynamic_vis_scale=mapping_cfg["dynamic_vis_scale"],
+            dynamic_vis_min=mapping_cfg["dynamic_vis_min"],
         )
+        if bool(getattr(cfg.foundation_model, "mapping_log_profile", True)):
+            print(
+                f"[mapping] scene={scene_id} source={mapping_cfg['source_format']} "
+                f"mode={mapping_cfg['visibility_mode']} "
+                f"vis_thres={mapping_cfg['visibility_threshold']:.3f} "
+                f"dynamic_scale={mapping_cfg['dynamic_vis_scale']:.3f} "
+                f"dynamic_min={mapping_cfg['dynamic_vis_min']:.3f}"
+            )
 
         points = torch.from_numpy(loader.read_pointcloud()).to(self.device)
         n_points = points.shape[0]
@@ -249,6 +262,48 @@ class BaseMaskStpls3d:
                     ].permute(1, 0)
 
         return stage_outputs, grounded_features
+
+    def _resolve_mapping_cfg(self, *, cfg, scene_pcd_path):
+        source_ext = ""
+        if scene_pcd_path:
+            source_ext = os.path.splitext(scene_pcd_path)[1].lower().lstrip(".")
+
+        fm_cfg = cfg.foundation_model
+        auto_sparse_txt = bool(getattr(fm_cfg, "mapping_auto_sparse_txt", True))
+
+        base_visibility_threshold = float(getattr(fm_cfg, "mapping_visibility_threshold", 1.0))
+        base_visibility_mode = getattr(fm_cfg, "mapping_visibility_mode", "dynamic")
+        base_dynamic_vis_scale = float(getattr(fm_cfg, "mapping_dynamic_vis_scale", 0.01))
+        base_dynamic_vis_min = float(getattr(fm_cfg, "mapping_dynamic_vis_min", 0.05))
+
+        if auto_sparse_txt and source_ext == "txt":
+            return {
+                "source_format": source_ext or "unknown",
+                "visibility_threshold": float(
+                    getattr(fm_cfg, "mapping_txt_visibility_threshold", base_visibility_threshold)
+                ),
+                "visibility_mode": getattr(fm_cfg, "mapping_txt_visibility_mode", base_visibility_mode),
+                "dynamic_vis_scale": float(
+                    getattr(fm_cfg, "mapping_txt_dynamic_vis_scale", 0.03)
+                ),
+                "dynamic_vis_min": float(
+                    getattr(fm_cfg, "mapping_txt_dynamic_vis_min", 0.20)
+                ),
+            }
+
+        return {
+            "source_format": source_ext or "unknown",
+            "visibility_threshold": float(
+                getattr(fm_cfg, "mapping_ply_visibility_threshold", base_visibility_threshold)
+            ),
+            "visibility_mode": getattr(fm_cfg, "mapping_ply_visibility_mode", base_visibility_mode),
+            "dynamic_vis_scale": float(
+                getattr(fm_cfg, "mapping_ply_dynamic_vis_scale", base_dynamic_vis_scale)
+            ),
+            "dynamic_vis_min": float(
+                getattr(fm_cfg, "mapping_ply_dynamic_vis_min", base_dynamic_vis_min)
+            ),
+        }
 
     def generate_crop_masks(self, image_pil, image_rgb, class_names, cfg):
         raise NotImplementedError

@@ -42,6 +42,56 @@ class stpls3dEval(object):
         self.use_label = use_label
         self.eval_class_labels = ["class_agnostic"] if not self.use_label else self.valid_class_labels
 
+    def _build_encoded_gt_ids(self, gts_sem, gts_ins, gt_instance_format="auto"):
+        gts_sem = np.asarray(gts_sem, dtype=np.int32)
+        gts_ins = np.asarray(gts_ins, dtype=np.int32)
+
+        if gt_instance_format == "auto":
+            non_ignore = gts_ins >= 0
+            if np.any(non_ignore):
+                match_ratio = np.mean((gts_ins[non_ignore] // self.encode_value) == gts_sem[non_ignore])
+                ge_encode_ratio = np.mean(gts_ins[non_ignore] >= self.encode_value)
+                gt_instance_format = "encoded" if match_ratio > 0.95 and ge_encode_ratio > 0.95 else "raw"
+            else:
+                gt_instance_format = "raw"
+
+        if gt_instance_format == "encoded":
+            gt_sem_extracted = gts_ins // self.encode_value
+            gt_ins_extracted = gts_ins % self.encode_value
+
+            if not np.all(gt_sem_extracted == gts_sem):
+                print("警告：gts_sem与gts_ins中的语义信息不一致，使用gts_ins中的语义")
+
+            gts_sem_mapped = np.array([self.sem_label_mapping.get(label, 0) for label in gt_sem_extracted], dtype=np.int32)
+            valid_mask = (gts_ins >= self.encode_value) & (gts_sem_mapped > 0)
+            gts = np.zeros_like(gts_ins, dtype=np.int32)
+            gts[valid_mask] = gts_sem_mapped[valid_mask] * self.encode_value + gt_ins_extracted[valid_mask]
+            return gts, gt_instance_format
+
+        if gt_instance_format != "raw":
+            raise ValueError(f"Unsupported gt_instance_format: {gt_instance_format}")
+
+        gts_sem_mapped = np.array([self.sem_label_mapping.get(label, 0) for label in gts_sem], dtype=np.int32)
+        valid_mask = (gts_ins >= 0) & (gts_sem_mapped > 0)
+        gts = np.zeros_like(gts_ins, dtype=np.int32)
+        if not np.any(valid_mask):
+            return gts, gt_instance_format
+
+        for sem_id in np.unique(gts_sem_mapped[valid_mask]):
+            sem_mask = valid_mask & (gts_sem_mapped == sem_id)
+            raw_instance_ids = gts_ins[sem_mask]
+            unique_raw_ids = np.unique(raw_instance_ids)
+            if unique_raw_ids.shape[0] >= self.encode_value:
+                raise ValueError(
+                    f"Too many raw instances ({unique_raw_ids.shape[0]}) for semantic {sem_id}; "
+                    f"cannot encode with base {self.encode_value}"
+                )
+            local_id_map = {int(raw_id): local_id for local_id, raw_id in enumerate(unique_raw_ids.tolist(), start=1)}
+            local_ids = np.array([local_id_map[int(raw_id)] for raw_id in raw_instance_ids], dtype=np.int32)
+            gts[sem_mask] = sem_id * self.encode_value + local_ids
+
+        return gts, gt_instance_format
+
     def evaluate_matches(self, matches):
         ious = self.ious
         min_region_sizes = [self.min_region_sizes[0]]
@@ -211,18 +261,12 @@ class stpls3dEval(object):
             avg_dict["classes"][label_name]["rc25%"] = np.average(rcs[d_inf, li, o25])
         return avg_dict
 
-    def assign_instances_for_scan(self, preds, gts_sem, gts_ins):
-        gt_sem_extracted = gts_ins // self.encode_value
-        gt_ins_extracted = gts_ins % self.encode_value
-
-        if not np.all(gt_sem_extracted == gts_sem):
-            print("警告：gts_sem与gts_ins中的语义信息不一致，使用gts_ins中的语义")
-
-        gts_sem_mapped = np.array([self.sem_label_mapping.get(label, 0) for label in gt_sem_extracted])
-
-        valid_mask = (gts_ins >= self.encode_value) & (gts_sem_mapped > 0)
-        gts = np.zeros_like(gts_ins, dtype=np.int32)
-        gts[valid_mask] = gts_sem_mapped[valid_mask] * self.encode_value + gt_ins_extracted[valid_mask]
+    def assign_instances_for_scan(self, preds, gts_sem, gts_ins, gt_instance_format="auto"):
+        gts, gt_instance_format = self._build_encoded_gt_ids(
+            gts_sem,
+            gts_ins,
+            gt_instance_format=gt_instance_format,
+        )
 
         gt_instances = get_instances(gts, self.valid_class_ids, self.valid_class_labels,
                                     self.id2label, dataset=self.dataset_name)
@@ -357,7 +401,7 @@ class stpls3dEval(object):
         if self.use_label:
             filename = "scene_ovis_results.txt"
         else:
-            filename = "zAPresults/stpls3d_zbuffer/uto_img16_s1.txt"
+            filename = "zAPresults/stpls3d_zbuffer/txt_uto_img16_s12.txt"
         if not output_tag:
             return filename
         base, ext = os.path.splitext(filename)

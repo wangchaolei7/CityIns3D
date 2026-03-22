@@ -69,10 +69,15 @@ def process_scene_for_eval(task):
     scene_id = scene.replace(".pth", "")
     gt_path = resolve_scene_path(pcl_path, scene_id)
     sem_gt, inst_gt = load_semantic_instance(gt_path)
+    gt_ext = os.path.splitext(gt_path)[1].lower()
+    gt_instance_format = "raw" if gt_ext == ".txt" else "encoded"
 
     scan_eval = stpls3dEval(class_labels=class_labels, use_label=False, dataset_name=dataset_name)
     valid_mask = np.isin(sem_gt, valid_semantic_ids)
-    valid_mask = np.logical_and(valid_mask, inst_gt >= scan_eval.encode_value)
+    if gt_instance_format == "raw":
+        valid_mask = np.logical_and(valid_mask, inst_gt >= 0)
+    else:
+        valid_mask = np.logical_and(valid_mask, inst_gt >= scan_eval.encode_value)
     if not np.any(valid_mask):
         return {"status": "skip", "scene": scene, "reason": "has no valid foreground points"}
 
@@ -110,7 +115,12 @@ def process_scene_for_eval(task):
             conf = float(confs[ind])
         tmp.append({"scan_id": scene_id, "label_id": 0, "conf": conf, "pred_mask": eval_mask})
 
-    gt2pred, pred2gt = scan_eval.assign_instances_for_scan(tmp, eval_sem, eval_inst)
+    gt2pred, pred2gt = scan_eval.assign_instances_for_scan(
+        tmp,
+        eval_sem,
+        eval_inst,
+        gt_instance_format=gt_instance_format,
+    )
     scene_matches = {"gt_0": {"gt": gt2pred, "pred": pred2gt}}
     scene_ap, scene_rc = scan_eval.evaluate_matches(scene_matches)
     scene_avgs = scan_eval.compute_averages(scene_ap, scene_rc)
