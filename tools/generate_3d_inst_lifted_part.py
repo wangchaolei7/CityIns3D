@@ -5,8 +5,6 @@ import time
 
 import numpy as np
 import torch
-import yaml
-from munch import Munch
 from tqdm import tqdm
 
 
@@ -14,6 +12,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+from open3dis.src.config_utils import load_yaml_config  # noqa: E402
 from open3dis.src.clustering.clustering_lifted_part_utonia_stpls3d import (  # noqa: E402
     process_lifted_part_utonia_stpls3d,
 )
@@ -37,6 +36,12 @@ def rle_encode_gpu_batch(masks: torch.Tensor):
 def get_parser():
     parser = argparse.ArgumentParser(description="Generate lifted-part 3D proposals for STPLS3D")
     parser.add_argument("--config", type=str, required=True, help="Path to yaml config")
+    parser.add_argument(
+        "--config-overlay",
+        action="append",
+        default=[],
+        help="Optional yaml overlay applied after --config; repeat this flag for multiple overlays",
+    )
     parser.add_argument("--scene", type=str, default=None, help="Optional single scene id")
     parser.add_argument("--scene-list", type=str, default=None, help="Optional scene list override")
     parser.add_argument("--worker-id", type=int, default=0, help="Worker shard index")
@@ -56,7 +61,8 @@ def resolve_output_dir(cfg, cli_output_dir=None):
 
 if __name__ == "__main__":
     args = get_parser().parse_args()
-    cfg = Munch.fromDict(yaml.safe_load(open(args.config, "r").read()))
+    cfg = load_yaml_config(args.config, args.config_overlay)
+    print(f"[LiftedPart] config_stack={getattr(cfg, '_config_paths', [args.config])}")
 
     if args.scene:
         scene_ids = [args.scene]
@@ -101,6 +107,7 @@ if __name__ == "__main__":
 
         print(
             f"[LiftedPart] saved {scene_id} -> {output_path} "
+            f"mode={stats.get('proposal_mode', 'spp_completion')} "
             f"raw_parts={stats.get('raw_parts', 0)} "
             f"valid_parts={stats.get('valid_parts', 0)} "
             f"merged_groups={stats.get('merged_groups', 0)} "

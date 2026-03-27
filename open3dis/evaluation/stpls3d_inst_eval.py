@@ -31,6 +31,8 @@ class stpls3dEval(object):
                 10: 10, # StreetSign
                 11: 11, # Clutter
                 12: 12, # Fence
+                13: 13, # Pedestrian
+                14: 14, # TrafficCone
             }
         else:
             self.sem_label_mapping = {}
@@ -401,7 +403,7 @@ class stpls3dEval(object):
         if self.use_label:
             filename = "scene_ovis_results.txt"
         else:
-            filename = "zAPresults/stpls3d_zbuffer/txt_uto_img16_s12.txt"
+            filename = "zAPresults/stpls3d_zbuffer/txt_uto_img16_s1.txt"
         if not output_tag:
             return filename
         base, ext = os.path.splitext(filename)

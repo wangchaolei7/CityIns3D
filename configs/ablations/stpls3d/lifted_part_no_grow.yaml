@@ -1,0 +1,9 @@
+cluster:
+  lifted_part:
+    proposal_mode: 'no_grow'
+    component_split: True
+
+exp:
+  input_exp_name: 'version_SAM3'
+  exp_name: 'version_SAM3_ablation_lifted_part_no_grow'
+  clustering_3d_output_lifted_part: 'txt_3d_ins_img16_lifted_part_no_grow'

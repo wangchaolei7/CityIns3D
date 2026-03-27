@@ -1,0 +1,7 @@
+cluster:
+  proposal_mode: 'split_only'
+
+exp:
+  input_exp_name: 'version_SAM3'
+  exp_name: 'version_SAM3_ablation_split_only'
+  clustering_3d_output: '3d_ins_img16_split_only'

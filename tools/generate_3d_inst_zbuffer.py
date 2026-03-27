@@ -9,13 +9,12 @@ import clip
 #### SigLip
 # from transformers import AutoTokenizer, AutoProcessor, AutoModel
 import torch
-import yaml
-from munch import Munch
 from open3dis.dataset_outdoor.stpls3d import INSTANCE_CAT_STPLS3D
 
 # from open3dis.src.clustering.clustering_clone import process_hierarchical_agglomerative_spp, process_hierarchical_agglomerative_nospp, process_hierarchical_agglomerative_growspp
 # from open3dis.src.clustering.clustering_zbuffer import process_hierarchical_agglomerative_growspp
 # from open3dis.src.clustering.clustering_zbuffer_kitti import process_hierarchical_agglomerative_growspp_kitti
+from open3dis.src.config_utils import load_yaml_config
 from open3dis.src.clustering.clustering_zbuffer_stpls3d import process_hierarchical_agglomerative_growspp_stpls3d
 from torch.nn import functional as F
 from tqdm import tqdm, trange
@@ -81,6 +80,12 @@ def get_parser():
     parser = argparse.ArgumentParser(description="Configuration Open3DIS")
     parser.add_argument("--config",type=str,required = True,help="Config")
     parser.add_argument(
+        "--config-overlay",
+        action="append",
+        default=[],
+        help="Optional yaml overlay applied after --config; repeat this flag for multiple overlays.",
+    )
+    parser.add_argument(
         "--disable-splitting",
         action="store_true",
         help="Disable 3D splitting after lifting 2D masks; still run growing.",
@@ -91,7 +96,8 @@ if __name__ == "__main__":
 
     args = get_parser().parse_args()
 
-    cfg = Munch.fromDict(yaml.safe_load(open(args.config, "r").read()))
+    cfg = load_yaml_config(args.config, args.config_overlay)
+    print(f"[3D clustering] config_stack={getattr(cfg, '_config_paths', [args.config])}")
     if args.disable_splitting:
         cfg.cluster.enable_splitting = False
         print("[3D clustering] splitting disabled: lifted 2D masks will skip clustering and go directly to growing.")

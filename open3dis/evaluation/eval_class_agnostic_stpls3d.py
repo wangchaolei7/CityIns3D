@@ -5,12 +5,12 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import argparse
-import yaml
-from munch import Munch
+
 
 from stpls3d_inst_eval import stpls3dEval
 from open3dis.dataset_outdoor.stpls3d import INSTANCE_CAT_STPLS3D
 from open3dis.dataset_outdoor.stpls3d_io import load_semantic_instance, resolve_scene_path
+from open3dis.src.config_utils import load_yaml_config
 
 
 def torch_load_local(path):
@@ -36,6 +36,12 @@ def rle_decode(rle):
 def get_parser():
     parser = argparse.ArgumentParser(description="Configuration Open3DIS")
     parser.add_argument("--config", type=str, required=True, help="Config")
+    parser.add_argument(
+        "--config-overlay",
+        action="append",
+        default=[],
+        help="Optional yaml overlay applied after --config; repeat this flag for multiple overlays.",
+    )
     parser.add_argument("--type", type=str, required=True, help="[2D, 3D, 2D_3D]")
     parser.add_argument("--num-workers", type=int, default=0, help="Parallel scene workers, 0 for auto")
     parser.add_argument(
@@ -47,6 +53,15 @@ def get_parser():
     )
 
     return parser
+
+
+def sanitize_tag(value: str) -> str:
+    return str(value).replace(os.sep, "_").replace(" ", "_")
+
+
+def build_eval_output_tag(eval_type: str, protocol: str, data_path: str) -> str:
+    data_name = sanitize_tag(os.path.basename(os.path.normpath(data_path)))
+    return f"{eval_type.lower()}_{protocol}_{data_name}"
 
 
 def process_scene_for_eval(task):
@@ -139,7 +154,8 @@ def process_scene_for_eval(task):
 if __name__ == "__main__":
 
     args = get_parser().parse_args()
-    cfg = Munch.fromDict(yaml.safe_load(open(args.config, "r").read()))
+    cfg = load_yaml_config(args.config, args.config_overlay)
+    print(f"[eval] config_stack={getattr(cfg, '_config_paths', [args.config])}")
 
     eval_type = args.type
     protocol = args.protocol
@@ -154,9 +170,13 @@ if __name__ == "__main__":
         if eval_type == '2D_3D':
             pass
 
+    eval_output_tag = build_eval_output_tag(eval_type, protocol, data_path)
+    eval_output_dir = os.path.join(cfg.exp.save_dir, cfg.exp.exp_name, "eval_class_agnostic")
+
     scenes = sorted([s for s in os.listdir(data_path) if s.endswith(".pth")])
-    VALID_SEMANTIC_IDS = [1,2,3,4,5,6,7,8,9,10,11,12]  # STPLS3D 12类前景 类别2是否存在意味着是否去掉植被
+    VALID_SEMANTIC_IDS = [1,2,3,4,5,6,7,8,9,10,11,12,13,14]  # STPLS3D 12类前景 类别2是否存在意味着是否去掉植被
     print(f"[eval] protocol={protocol} scenes={len(scenes)} data_path={data_path}")
+    print(f"[eval] output_dir={eval_output_dir} output_tag={eval_output_tag}")
     num_workers = args.num_workers
     if num_workers <= 0:
         num_workers = min(32, max(1, os.cpu_count() or 1))
@@ -193,4 +213,4 @@ if __name__ == "__main__":
                     continue
                 scene_entries.append(result)
 
-    scan_eval.evaluate_precomputed(scene_entries, exp_path="./", output_tag=protocol)
+    scan_eval.evaluate_precomputed(scene_entries, exp_path=eval_output_dir, output_tag=eval_output_tag)

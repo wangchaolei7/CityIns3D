@@ -1,7 +1,5 @@
 import os
 import time
-from collections import deque
-from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -14,6 +12,13 @@ from open3dis.src.clustering.geometry_grow_stpls3d import (
     aggregate_spp_features,
     build_spp_adjacency_point_knn,
     build_spp_members,
+)
+from open3dis.src.clustering.lifted_part_proposal_modes import (
+    LiftedPartProposalContext,
+    PartGroup,
+    build_lifted_part_proposals,
+    lifted_part_mode_requires_point_indices,
+    resolve_lifted_part_proposal_mode,
 )
 from open3dis.src.mapper_zbuffer import PointCloudToImageMapper
 
@@ -102,58 +107,6 @@ def _support_similarity(
     raise ValueError(f"Unsupported support affinity metric: {metric}")
 
 
-def _connected_components_from_adj(neighbors: Sequence[Sequence[int]], node_ids: Sequence[int]) -> List[List[int]]:
-    allowed = set(int(x) for x in node_ids)
-    visited = set()
-    components = []
-
-    for start in node_ids:
-        start = int(start)
-        if start in visited:
-            continue
-        queue = deque([start])
-        visited.add(start)
-        component = []
-
-        while queue:
-            current = queue.popleft()
-            component.append(current)
-            for neighbor in neighbors[current]:
-                neighbor = int(neighbor)
-                if neighbor not in allowed or neighbor in visited:
-                    continue
-                visited.add(neighbor)
-                queue.append(neighbor)
-
-        components.append(component)
-
-    return components
-
-
-@dataclass
-class PartGroup:
-    member_parts: List[int]
-    support_raw: torch.Tensor
-    feature_raw: torch.Tensor
-    conf_sum: float
-
-    @property
-    def support(self) -> torch.Tensor:
-        return F.normalize(self.support_raw.unsqueeze(0), dim=1, p=2, eps=1e-6)[0]
-
-    @property
-    def feature(self) -> torch.Tensor:
-        return F.normalize(self.feature_raw.unsqueeze(0), dim=1, p=2, eps=1e-6)[0]
-
-    def merged_with(self, other: "PartGroup") -> "PartGroup":
-        return PartGroup(
-            member_parts=self.member_parts + other.member_parts,
-            support_raw=self.support_raw + other.support_raw,
-            feature_raw=self.feature_raw + other.feature_raw,
-            conf_sum=float(self.conf_sum + other.conf_sum),
-        )
-
-
 def _build_part_groups(
     part_support: torch.Tensor,
     part_features: torch.Tensor,
@@ -231,52 +184,6 @@ def _merge_groups_progressively(
     return groups, stage_stats
 
 
-def _assign_spp_ownership(
-    groups: List[PartGroup],
-    *,
-    spp_features: torch.Tensor,
-    tie_break: bool,
-    tie_margin: float,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    if not groups:
-        empty_owner = torch.empty((0,), dtype=torch.long, device=spp_features.device)
-        empty_scores = torch.empty((0,), dtype=torch.float32, device=spp_features.device)
-        return empty_owner, empty_scores
-
-    group_support = torch.stack([group.support_raw for group in groups], dim=0)
-    support_scores, owner = torch.max(group_support, dim=0)
-
-    if tie_break and len(groups) > 1:
-        group_feature = torch.stack([group.feature for group in groups], dim=0)
-        feature_scores = group_feature @ spp_features.T
-        tie_mask = (group_support >= (support_scores.unsqueeze(0) - tie_margin)) & (group_support > 0)
-        tie_count = tie_mask.sum(dim=0)
-        if torch.any(tie_count > 1):
-            tie_feature = feature_scores.masked_fill(~tie_mask, -1e6)
-            tie_owner = torch.argmax(tie_feature, dim=0)
-            owner = torch.where(tie_count > 1, tie_owner, owner)
-
-    owner = torch.where(support_scores > 0, owner, torch.full_like(owner, -1))
-    return owner, support_scores
-
-
-def _proposal_confidence_from_parts(
-    component_spp: Sequence[int],
-    group: PartGroup,
-    part_support: torch.Tensor,
-    part_conf: torch.Tensor,
-) -> float:
-    if len(component_spp) == 0:
-        return 0.0
-    component_spp_tensor = torch.tensor(component_spp, device=part_support.device, dtype=torch.long)
-    member_parts = torch.tensor(group.member_parts, device=part_support.device, dtype=torch.long)
-    support_weight = part_support[member_parts][:, component_spp_tensor].sum(dim=1)
-    if float(support_weight.sum().item()) <= 0:
-        return float(part_conf[member_parts].mean().item())
-    score = (part_conf[member_parts] * support_weight).sum() / support_weight.sum().clamp_min(1e-6)
-    return float(score.item())
-
-
 def _collect_lifted_parts(
     scene_id: str,
     cfg,
@@ -288,7 +195,8 @@ def _collect_lifted_parts(
     spp_counts: torch.Tensor,
     point_features: torch.Tensor,
     groundedsam_data_dict: Dict,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, float]]:
+    collect_point_indices: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[torch.Tensor], Dict[str, float]]:
     device = points.device
     n_spp = int(spp.max().item() + 1)
 
@@ -300,6 +208,7 @@ def _collect_lifted_parts(
     part_support_rows = []
     part_features = []
     part_conf = []
+    part_point_indices = []
 
     raw_parts = 0
     valid_parts = 0
@@ -384,13 +293,15 @@ def _collect_lifted_parts(
             part_support_rows.append(support_row)
             part_features.append(feature)
             part_conf.append(conf)
+            if collect_point_indices:
+                part_point_indices.append(highlight_points.clone())
             valid_parts += 1
 
     if not part_support_rows:
         empty_support = torch.zeros((0, n_spp), dtype=torch.float32, device=device)
         empty_feature = torch.zeros((0, point_features.shape[1]), dtype=torch.float32, device=device)
         empty_conf = torch.zeros((0,), dtype=torch.float32, device=device)
-        return empty_support, empty_feature, empty_conf, {
+        return empty_support, empty_feature, empty_conf, [], {
             "raw_parts": float(raw_parts),
             "valid_parts": float(valid_parts),
         }
@@ -398,7 +309,7 @@ def _collect_lifted_parts(
     support = torch.stack(part_support_rows, dim=0)
     features = torch.stack(part_features, dim=0)
     conf = torch.tensor(part_conf, dtype=torch.float32, device=device)
-    return support, features, conf, {
+    return support, features, conf, part_point_indices, {
         "raw_parts": float(raw_parts),
         "valid_parts": float(valid_parts),
     }
@@ -406,7 +317,8 @@ def _collect_lifted_parts(
 
 @torch.inference_mode()
 def process_lifted_part_utonia_stpls3d(scene_id: str, cfg):
-    exp_path = os.path.join(cfg.exp.save_dir, cfg.exp.exp_name)
+    input_exp_name = getattr(cfg.exp, "input_exp_name", cfg.exp.exp_name)
+    exp_path = os.path.join(cfg.exp.save_dir, input_exp_name)
     mask2d_path = os.path.join(exp_path, cfg.exp.mask2d_output, f"{scene_id}.pth")
     if not os.path.exists(mask2d_path):
         raise FileNotFoundError(f"Missing 2D mask file for {scene_id}: {mask2d_path}")
@@ -454,8 +366,9 @@ def process_lifted_part_utonia_stpls3d(scene_id: str, cfg):
     )
 
     groundedsam_data_dict = _torch_load_local(mask2d_path, map_location="cpu")
+    proposal_mode = resolve_lifted_part_proposal_mode(cfg.cluster)
     collect_start = time.perf_counter()
-    part_support, part_features, part_conf, collect_stats = _collect_lifted_parts(
+    part_support, part_features, part_conf, part_point_indices, collect_stats = _collect_lifted_parts(
         scene_id,
         cfg,
         loader=loader,
@@ -465,6 +378,7 @@ def process_lifted_part_utonia_stpls3d(scene_id: str, cfg):
         spp_counts=spp_counts.to(device=device, dtype=torch.float32),
         point_features=point_features,
         groundedsam_data_dict=groundedsam_data_dict,
+        collect_point_indices=lifted_part_mode_requires_point_indices(cfg.cluster),
     )
     collect_elapsed = time.perf_counter() - collect_start
 
@@ -486,46 +400,18 @@ def process_lifted_part_utonia_stpls3d(scene_id: str, cfg):
     )
     merge_elapsed = time.perf_counter() - merge_start
 
-    tie_break = bool(getattr(cfg.cluster, "part_reassign_use_feature_tiebreak", True))
-    tie_margin = float(getattr(cfg.cluster, "part_reassign_tie_margin", 1e-3))
-    owner, owner_scores = _assign_spp_ownership(
-        groups,
+    proposal_context = LiftedPartProposalContext(
+        cluster_cfg=cfg.cluster,
+        scene_points=points,
+        n_points=n_points,
+        spp_members=spp_members,
+        spp_neighbors=spp_neighbors,
         spp_features=spp_features,
-        tie_break=tie_break,
-        tie_margin=tie_margin,
+        part_support=part_support,
+        part_conf=part_conf,
+        part_point_indices=part_point_indices if part_point_indices else None,
     )
-
-    cleanup_min_spp = int(getattr(cfg.cluster, "part_final_component_min_spp", 1))
-    cleanup_min_points = int(getattr(cfg.cluster, "part_final_component_min_points", getattr(cfg.cluster, "valid_points", 50)))
-
-    proposals = []
-    confidence = []
-    spp_per_proposal = []
-
-    for group_id, group in enumerate(groups):
-        group_spp = torch.nonzero(owner == group_id, as_tuple=True)[0].detach().cpu().tolist()
-        if len(group_spp) < cleanup_min_spp:
-            continue
-
-        components = _connected_components_from_adj(spp_neighbors, group_spp)
-        for component in components:
-            if len(component) < cleanup_min_spp:
-                continue
-
-            point_ids = [spp_members[spp_idx] for spp_idx in component if spp_members[spp_idx].numel() > 0]
-            if not point_ids:
-                continue
-            component_points = torch.cat(point_ids, dim=0)
-            if component_points.numel() < cleanup_min_points:
-                continue
-
-            proposal = torch.zeros((n_points,), dtype=torch.bool, device=device)
-            proposal[component_points] = True
-            proposals.append(proposal)
-            confidence.append(
-                _proposal_confidence_from_parts(component, group, part_support, part_conf)
-            )
-            spp_per_proposal.append(len(component))
+    proposals, confidence, proposal_stats = build_lifted_part_proposals(groups, proposal_context)
 
     if not proposals:
         print(f"[LiftedPart] scene={scene_id} no proposals remained after reassignment and cleanup.")
@@ -539,13 +425,14 @@ def process_lifted_part_utonia_stpls3d(scene_id: str, cfg):
         "valid_parts": int(collect_stats["valid_parts"]),
         "merged_groups": int(len(groups)),
         "final_proposals": int(proposals3d.shape[0]),
-        "avg_spp_per_proposal": float(np.mean(spp_per_proposal)) if spp_per_proposal else 0.0,
+        "avg_spp_per_proposal": float(proposal_stats.get("avg_spp_per_proposal", 0.0)),
         "num_points": int(n_points),
         "num_spp": int(n_spp),
         "collect_time": float(collect_elapsed),
         "merge_time": float(merge_elapsed),
         "device": str(device),
         "stage_stats": stage_stats,
-        "ownership_nonzero": int((owner_scores > 0).sum().item()),
+        "proposal_mode": proposal_mode,
+        **proposal_stats,
     }
     return proposals3d, confidence_t, stats
